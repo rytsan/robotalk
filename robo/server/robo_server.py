@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import socket
@@ -47,10 +48,14 @@ VOICE_MODEL_JSON = VOICES_DIR / "pt_BR-faber-medium.onnx.json"
 HOST = "0.0.0.0"
 PORT = 8765
 DISCOVERY_ENABLED = os.environ.get("ROBO_DISCOVERY_ENABLED", "1").strip() != "0"
+DISCOVERY_BEACON_ENABLED = os.environ.get("ROBO_DISCOVERY_BEACON_ENABLED", "0").strip() == "1"
 DISCOVERY_PORT = int(os.environ.get("ROBO_DISCOVERY_PORT", "8766"))
 DISCOVERY_INTERVAL_S = float(os.environ.get("ROBO_DISCOVERY_INTERVAL_S", "1.0"))
 DISCOVERY_SERVER_ID = os.environ.get("ROBO_DISCOVERY_SERVER_ID", "robo-main").strip() or "robo-main"
 DISCOVERY_TOKEN = os.environ.get("ROBO_DISCOVERY_TOKEN", "").strip()
+DISCOVERY_ADVERTISE_HOST = os.environ.get("ROBO_DISCOVERY_ADVERTISE_HOST", "").strip()
+DISCOVERY_HOTSPOT_CIDR = os.environ.get("ROBO_DISCOVERY_HOTSPOT_CIDR", "10.42.0.0/24").strip()
+DISCOVERY_HOTSPOT_HOST = os.environ.get("ROBO_DISCOVERY_HOTSPOT_HOST", "10.42.0.1").strip()
 PROTOCOL_VERSION = 1
 
 CARDPUTER_SAMPLE_RATE = 17000
@@ -139,6 +144,27 @@ def local_ip_for(dest_ip: str) -> str:
             sock.close()
 
 
+def client_in_hotspot(client_ip: str) -> bool:
+    if not DISCOVERY_HOTSPOT_CIDR or not DISCOVERY_HOTSPOT_HOST:
+        return False
+
+    try:
+        client_addr = ipaddress.ip_address(client_ip)
+        hotspot_net = ipaddress.ip_network(DISCOVERY_HOTSPOT_CIDR, strict=False)
+    except ValueError:
+        return False
+
+    return client_addr in hotspot_net
+
+
+def advertised_host_for(client_ip: str) -> str:
+    if DISCOVERY_ADVERTISE_HOST:
+        return DISCOVERY_ADVERTISE_HOST
+    if client_in_hotspot(client_ip):
+        return DISCOVERY_HOTSPOT_HOST
+    return local_ip_for(client_ip)
+
+
 def discovery_payload() -> bytes:
     payload = {
         "type": "ROBO_BEACON",
@@ -164,7 +190,7 @@ def discovery_response(request_text: str, client_ip: str) -> bytes | None:
     if not mac:
         return None
 
-    ws_url = f"ws://{local_ip_for(client_ip)}:{PORT}"
+    ws_url = f"ws://{advertised_host_for(client_ip)}:{PORT}"
     return f"ROBOT {ws_url} {mac}".encode("utf-8")
 
 
@@ -184,6 +210,14 @@ async def discovery_beacon_loop() -> None:
 
     sock.setblocking(False)
     print(f"Discovery UDP escutando RDISCOVER na porta {DISCOVERY_PORT}.")
+    if DISCOVERY_ADVERTISE_HOST:
+        print(f"Discovery UDP anunciando host fixo: {DISCOVERY_ADVERTISE_HOST}.")
+    elif DISCOVERY_HOTSPOT_CIDR and DISCOVERY_HOTSPOT_HOST:
+        print(f"Discovery UDP anunciando {DISCOVERY_HOTSPOT_HOST} para clientes em {DISCOVERY_HOTSPOT_CIDR}.")
+    if DISCOVERY_BEACON_ENABLED:
+        print(f"Discovery UDP beacon ativo a cada {DISCOVERY_INTERVAL_S:.1f}s.")
+    else:
+        print("Discovery UDP beacon desativado; RDISCOVER continua ativo.")
     if not DISCOVERY_TOKEN:
         print("Aviso: ROBO_DISCOVERY_TOKEN vazio; firmware v2 com HMAC usará fallback WS_URL.")
 
@@ -192,7 +226,7 @@ async def discovery_beacon_loop() -> None:
     try:
         while True:
             now = loop.time()
-            if now - last_broadcast_at >= DISCOVERY_INTERVAL_S:
+            if DISCOVERY_BEACON_ENABLED and now - last_broadcast_at >= DISCOVERY_INTERVAL_S:
                 last_broadcast_at = now
                 try:
                     sock.sendto(discovery_payload(), ("255.255.255.255", DISCOVERY_PORT))

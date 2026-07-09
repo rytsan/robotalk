@@ -42,13 +42,15 @@ O Cardputer valida o HMAC com o mesmo segredo configurado em `ROBOT_SECRET`.
 
 ## UDP beacon compatível
 
-O servidor também envia, periodicamente, um beacon JSON de compatibilidade:
+O servidor pode enviar, periodicamente, um beacon JSON de compatibilidade:
 
 ```json
 {"type":"ROBO_BEACON","server_id":"robo-main","proto":1,"ws_port":8765,"token_hash":""}
 ```
 
 O firmware v2 atual não depende desse beacon. Ele usa o fluxo `RDISCOVER`.
+Por isso, o beacon fica desativado por padrão para evitar erro de broadcast em redes
+sem rota padrão, como hotspot local isolado.
 
 ## Fluxo no Cardputer
 
@@ -91,13 +93,20 @@ sha256(nonce + ":" + ROBO_DISCOVERY_TOKEN)[:16]
 
 ```bash
 export ROBO_DISCOVERY_ENABLED="1"
+export ROBO_DISCOVERY_BEACON_ENABLED="0"
 export ROBO_DISCOVERY_PORT="8766"
 export ROBO_DISCOVERY_INTERVAL_S="1.0"
 export ROBO_DISCOVERY_SERVER_ID="robo-main"
-export ROBO_DISCOVERY_TOKEN=""
+export ROBO_DISCOVERY_TOKEN="TROQUE_ESTE_SEGREDO_COMPARTILHADO"
 ```
 
-Para usar o firmware v2 com HMAC, `ROBO_DISCOVERY_TOKEN` precisa ser igual ao `ROBOT_SECRET` do `.ino`.
+Para usar o firmware v2 com HMAC, `ROBO_DISCOVERY_TOKEN` precisa ser igual ao `ROBOT_SECRET` do `.ino`. O `server/run_server.sh` já define o valor padrão acima, compatível com os firmwares do repositório. Se trocar o segredo no `.ino`, rode o servidor assim:
+
+```bash
+ROBO_DISCOVERY_TOKEN="meu_segredo" bash run_server.sh
+```
+
+O script `discovery_beacon.py` na raiz é um responder standalone/legado para testes. Não rode ele junto com `server/run_server.sh`, porque o servidor principal já escuta a porta UDP `8766`.
 
 Para desativar:
 

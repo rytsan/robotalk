@@ -185,6 +185,7 @@ void tratarTexto(const String& txt);
 
 String computeHmacHex(const String& msg);   // v2.1
 bool   descobrirServidor();                  // v2.1
+String gatewayWsUrl();                       // fallback automatico pelo DHCP
 
 void enableMic();
 void enableSpeaker();
@@ -362,9 +363,29 @@ bool descobrirServidor() {
     sprintf(nonce, "%08x", (unsigned)esp_random());
     String req = "RDISCOVER " + String(nonce);
 
-    disco.beginPacket(IPAddress(255, 255, 255, 255), DISCO_SERVER_PORT);
-    disco.write((const uint8_t*)req.c_str(), req.length());
-    disco.endPacket();
+    IPAddress ip = WiFi.localIP();
+    IPAddress mask = WiFi.subnetMask();
+    IPAddress subnetBroadcast(
+      ip[0] | (uint8_t)~mask[0],
+      ip[1] | (uint8_t)~mask[1],
+      ip[2] | (uint8_t)~mask[2],
+      ip[3] | (uint8_t)~mask[3]
+    );
+    IPAddress targets[] = {
+      WiFi.gatewayIP(),
+      subnetBroadcast,
+      IPAddress(255, 255, 255, 255)
+    };
+
+    for (uint8_t targetIndex = 0; targetIndex < 3; targetIndex++) {
+      IPAddress target = targets[targetIndex];
+      if (target == IPAddress(0, 0, 0, 0)) {
+        continue;
+      }
+      disco.beginPacket(target, DISCO_SERVER_PORT);
+      disco.write((const uint8_t*)req.c_str(), req.length());
+      disco.endPacket();
+    }
 
     unsigned long start = millis();
     while (millis() - start < DISCO_TIMEOUT_MS) {
@@ -399,6 +420,14 @@ bool descobrirServidor() {
 
   disco.stop();
   return false;
+}
+
+String gatewayWsUrl() {
+  IPAddress gateway = WiFi.gatewayIP();
+  if (gateway == IPAddress(0, 0, 0, 0)) {
+    return String("");
+  }
+  return String("ws://") + gateway.toString() + ":8765";
 }
 
 /* =========================== SD ===================================== */
@@ -442,8 +471,12 @@ void conectarWebSocket() {
   wsLastTry = millis();
   if (WiFi.status() != WL_CONNECTED) return;
 
-  // v2.1: prioriza a URL descoberta; cai para o WS_URL fixo.
-  String target = (resolvedWsUrl.length() > 0) ? resolvedWsUrl : String(WS_URL);
+  // v2.1: prioriza a URL descoberta; se falhar, usa o gateway DHCP do hotspot.
+  String gatewayUrl = gatewayWsUrl();
+  String target = (resolvedWsUrl.length() > 0) ? resolvedWsUrl : gatewayUrl;
+  if (target.length() == 0) {
+    target = String(WS_URL);
+  }
   if (!client.connect(target)) {
     // se a URL descoberta falhou, esquece-a para redescobrir depois
     resolvedWsUrl = "";
