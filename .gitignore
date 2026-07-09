@@ -1,0 +1,27 @@
+.agents/
+.codex/
+.robotalk.git/
+.venv/
+**/.venv/
+**/__pycache__/
+*.pyc
+
+# Capturas, saidas de audio e arquivos gerados
+*.wav
+*.raw
+*.log
+wget-log
+robo/server/mic_tests/
+robo/server/tts_out/
+robo/server/memory/
+tts/mic_tests/
+tts/piper_out*
+tts/fala*
+
+# Voz duplicada fora do servidor principal
+tts/voices/
+
+# Artefatos locais de IDE/sistema
+.DS_Store
+.idea/
+.vscode/
