@@ -156,8 +156,10 @@ String  resolvedWsUrl = "";          // v2.1: URL descoberta; vazio => usa WS_UR
 // Buffer circular do microfone em RAM
 int16_t* micRing = nullptr;
 
-// Buffer pequeno para playback vindo do SD (fica em RAM estatica)
-int16_t playBuffer[PLAY_CHUNK_SAMPLES];
+// Buffer DUPLO de playback (RAM estatica, ~7,7 KB no total).
+// playRaw() nao copia as amostras, so guarda o ponteiro: por isso o chunk que
+// esta tocando nao pode ser o mesmo que estamos preenchendo do SD.
+int16_t playBuffer[2][PLAY_CHUNK_SAMPLES];
 
 // estado do robo / animacao
 volatile RobotState currentState = STATE_IDLE;
@@ -794,8 +796,20 @@ void tocarArquivoRaw(const char* path) {
   setRobotState(STATE_SPEAKING);
   resetMouthAnim();
 
+  uint8_t bufIdx = 0;
+
   while (f.available()) {
-    int bytesLidos = f.read((uint8_t*)playBuffer, PLAY_CHUNK_BYTES);
+    // Espera ter VAGA na fila do canal antes de tocar no buffer.
+    // isPlaying(canal): 0 = parado, 1 = tocando, 2 = tocando + 1 enfileirado.
+    // Em 2 os dois buffers estao em uso; so abaixo disso o mais antigo e nosso.
+    while (M5Cardputer.Speaker.isPlaying(0) == 2) {
+      M5Cardputer.update();
+      tickMouth();
+      delay(1);
+    }
+
+    int16_t* buf = playBuffer[bufIdx];
+    int bytesLidos = f.read((uint8_t*)buf, PLAY_CHUNK_BYTES);
 
     if (bytesLidos <= 0) {
       break;
@@ -810,23 +824,18 @@ void tocarArquivoRaw(const char* path) {
     if (samples > 0) {
       // Visemas do chunk inteiro sao calculados aqui, de uma vez;
       // tickMouth() os consome a 20 ms enquanto o audio toca.
-      pushVisemesFromChunk(playBuffer, samples);
+      pushVisemesFromChunk(buf, samples);
 
-      M5Cardputer.Speaker.playRaw(
-        playBuffer,
-        samples,
-        RX_SAMPLE_RATE,
-        false,
-        1,
-        0
-      );
-
-      while (M5Cardputer.Speaker.isPlaying()) {
-        M5Cardputer.update();
-        tickMouth();
-        delay(1);
-      }
+      M5Cardputer.Speaker.playRaw(buf, samples, RX_SAMPLE_RATE, false, 1, 0);
+      bufIdx ^= 1;
     }
+  }
+
+  // drena o que ficou enfileirado, mantendo a boca viva ate o fim
+  while (M5Cardputer.Speaker.isPlaying()) {
+    M5Cardputer.update();
+    tickMouth();
+    delay(1);
   }
 
   f.close();
