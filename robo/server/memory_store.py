@@ -12,6 +12,7 @@ para a LLM quando ela for necessária.
 
 from __future__ import annotations
 
+import os
 import re
 import hashlib
 import json
@@ -21,9 +22,24 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from urllib import error, request
 
 EMBEDDING_DIMS = 128
 SEMANTIC_RESPONSE_THRESHOLD = 0.88
+
+# Embedding neural via Ollama, com o hashing local como rede de segurança.
+# Vazio em ROBO_EMBED_MODEL = usar só o hashing.
+EMBED_MODEL = os.environ.get("ROBO_EMBED_MODEL", "nomic-embed-text").strip()
+EMBED_URL = os.environ.get("ROBO_EMBED_URL", "http://127.0.0.1:11434/api/embeddings").strip()
+EMBED_TIMEOUT_S = float(os.environ.get("ROBO_EMBED_TIMEOUT_S", "20"))
+HASH_MODEL_NAME = "hash-128"
+EMBED_CACHE_MAX = 256
+
+# Vetores de modelos diferentes não são comparáveis: 128 dims contra 768 daria
+# cosseno 0 e a busca degradaria em silêncio. Por isso cada linha guarda de que
+# modelo veio, e o modelo ativo é decidido uma vez por sessão.
+_active_embed_model: str | None = None
+_embed_cache: dict[str, list[float]] = {}
 
 
 def normalize_text(text: str) -> str:
@@ -77,6 +93,84 @@ def text_embedding(text: str, dims: int = EMBEDDING_DIMS) -> list[float]:
     if norm == 0:
         return vector
     return [value / norm for value in vector]
+
+
+def embed_via_ollama(text: str) -> list[float] | None:
+    """Pede o embedding ao Ollama. Devolve None em qualquer falha."""
+    if not EMBED_MODEL or not EMBED_URL:
+        return None
+
+    payload = json.dumps({"model": EMBED_MODEL, "prompt": text}).encode("utf-8")
+    req = request.Request(
+        EMBED_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with request.urlopen(req, timeout=EMBED_TIMEOUT_S) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (error.URLError, OSError, json.JSONDecodeError):
+        return None
+
+    vector = data.get("embedding")
+    if not isinstance(vector, list) or not vector:
+        return None
+
+    values = [float(v) for v in vector]
+    norm = math.sqrt(sum(v * v for v in values))
+    if norm == 0:
+        return None
+    return [v / norm for v in values]
+
+
+def resolve_embed_model() -> str:
+    """Escolhe o modelo de embedding uma vez por sessão.
+
+    Decidir a cada chamada permitiria misturar vetores de modelos diferentes na
+    mesma tabela, e aí nada mais seria comparável com nada.
+    """
+    global _active_embed_model
+    if _active_embed_model is not None:
+        return _active_embed_model
+
+    if EMBED_MODEL and embed_via_ollama("teste") is not None:
+        _active_embed_model = EMBED_MODEL
+        print(f"Embedding: '{EMBED_MODEL}' via Ollama.")
+    else:
+        _active_embed_model = HASH_MODEL_NAME
+        if EMBED_MODEL:
+            print(f"Embedding: '{EMBED_MODEL}' indisponível; usando {HASH_MODEL_NAME}.")
+            print("           A busca por significado fica fraca até o Ollama voltar.")
+        else:
+            print(f"Embedding: {HASH_MODEL_NAME} por configuração.")
+
+    return _active_embed_model
+
+
+def embedding_for(text: str) -> tuple[list[float], str]:
+    """Devolve (vetor, modelo). Cai no hashing se o Ollama falhar na hora."""
+    modelo = resolve_embed_model()
+
+    if modelo == HASH_MODEL_NAME:
+        return text_embedding(text), HASH_MODEL_NAME
+
+    chave = text.strip()
+    if chave in _embed_cache:
+        return _embed_cache[chave], modelo
+
+    vector = embed_via_ollama(chave)
+    if vector is None:
+        # Falha pontual: não troca o modelo da sessão, só devolve algo usável.
+        # A linha fica marcada como hash e é regenerada no próximo arranque.
+        return text_embedding(text), HASH_MODEL_NAME
+
+    # A mesma fala é embutida várias vezes por turno (turno, cache, busca).
+    if len(_embed_cache) >= EMBED_CACHE_MAX:
+        _embed_cache.clear()
+    _embed_cache[chave] = vector
+    return vector, modelo
 
 
 def embedding_to_json(vector: list[float]) -> str:
@@ -209,6 +303,9 @@ class MemoryStore:
         )
         self.ensure_column("conversation_turns", "embedding", "TEXT")
         self.ensure_column("memories", "embedding", "TEXT")
+        self.ensure_column("conversation_turns", "embedding_model", "TEXT")
+        self.ensure_column("memories", "embedding_model", "TEXT")
+        self.ensure_column("response_cache", "embedding_model", "TEXT")
         self.init_fts()
         self.backfill_indexes()
         self.conn.commit()
@@ -256,19 +353,37 @@ class MemoryStore:
             return "question, answer, speaker_id"
         raise ValueError(f"Tabela FTS desconhecida: {table}")
 
+    def precisa_reembutir(self, row: sqlite3.Row, modelo: str) -> bool:
+        try:
+            atual = row["embedding_model"]
+        except (IndexError, KeyError):
+            atual = None
+        return (not row["embedding"]) or (atual != modelo)
+
     def backfill_indexes(self) -> None:
+        """Reconstrói índices lexicais e regenera embeddings desatualizados.
+
+        Trocar o modelo de embedding invalida todos os vetores gravados, porque
+        vetores de modelos diferentes não são comparáveis. A regeneração é feita
+        aqui, uma vez, no arranque.
+        """
+        modelo = resolve_embed_model()
+        regerados = 0
+
         turns = self.conn.execute(
             """
-            SELECT id, content, speaker_id, role, embedding
+            SELECT id, content, speaker_id, role, embedding, embedding_model
             FROM conversation_turns
             """
         ).fetchall()
         for row in turns:
-            if not row["embedding"]:
+            if self.precisa_reembutir(row, modelo):
+                vector, usado = embedding_for(row["content"])
                 self.conn.execute(
-                    "UPDATE conversation_turns SET embedding = ? WHERE id = ?",
-                    (embedding_to_json(text_embedding(row["content"])), int(row["id"])),
+                    "UPDATE conversation_turns SET embedding = ?, embedding_model = ? WHERE id = ?",
+                    (embedding_to_json(vector), usado, int(row["id"])),
                 )
+                regerados += 1
             self.fts_replace(
                 "conversation_turns_fts",
                 int(row["id"]),
@@ -277,17 +392,19 @@ class MemoryStore:
 
         memories = self.conn.execute(
             """
-            SELECT id, subject, predicate, object_value, tree_path, embedding
+            SELECT id, subject, predicate, object_value, tree_path, embedding, embedding_model
             FROM memories
             """
         ).fetchall()
         for row in memories:
             embedding_text = f"{row['subject']} {row['predicate']} {row['object_value']} {row['tree_path']}"
-            if not row["embedding"]:
+            if self.precisa_reembutir(row, modelo):
+                vector, usado = embedding_for(embedding_text)
                 self.conn.execute(
-                    "UPDATE memories SET embedding = ? WHERE id = ?",
-                    (embedding_to_json(text_embedding(embedding_text)), int(row["id"])),
+                    "UPDATE memories SET embedding = ?, embedding_model = ? WHERE id = ?",
+                    (embedding_to_json(vector), usado, int(row["id"])),
                 )
+                regerados += 1
             self.fts_replace(
                 "memories_fts",
                 int(row["id"]),
@@ -296,31 +413,37 @@ class MemoryStore:
 
         caches = self.conn.execute(
             """
-            SELECT id, question, answer, speaker_id, embedding
+            SELECT id, question, answer, speaker_id, embedding, embedding_model
             FROM response_cache
             """
         ).fetchall()
         for row in caches:
-            if not row["embedding"]:
+            if self.precisa_reembutir(row, modelo):
+                vector, usado = embedding_for(row["question"])
                 self.conn.execute(
-                    "UPDATE response_cache SET embedding = ? WHERE id = ?",
-                    (embedding_to_json(text_embedding(row["question"])), int(row["id"])),
+                    "UPDATE response_cache SET embedding = ?, embedding_model = ? WHERE id = ?",
+                    (embedding_to_json(vector), usado, int(row["id"])),
                 )
+                regerados += 1
             self.fts_replace(
                 "response_cache_fts",
                 int(row["id"]),
                 (row["question"], row["answer"], row["speaker_id"]),
             )
 
+        if regerados:
+            print(f"Memória: {regerados} embedding(s) regenerado(s) para '{modelo}'.")
+
     def add_turn(self, role: str, content: str, speaker_id: str = "ricardo") -> int | None:
         content = content.strip()
         if not content:
             return None
+        vector, modelo = embedding_for(content)
         cursor = self.conn.execute(
             """
             INSERT INTO conversation_turns
-                (created_at, speaker_id, role, content, normalized_content, embedding)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (created_at, speaker_id, role, content, normalized_content, embedding, embedding_model)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 now_ts(),
@@ -328,7 +451,8 @@ class MemoryStore:
                 role,
                 content,
                 normalize_text(content),
-                embedding_to_json(text_embedding(content)),
+                embedding_to_json(vector),
+                modelo,
             ),
         )
         rowid = int(cursor.lastrowid)
@@ -343,19 +467,21 @@ class MemoryStore:
         object_value = fact.object_value.strip()
         tree_path = fact.tree_path.strip()
         embedding_text = f"{subject} {predicate} {object_value} {tree_path}"
+        vector, modelo = embedding_for(embedding_text)
         self.conn.execute(
             """
             INSERT INTO memories
                 (created_at, updated_at, subject, predicate, object_value,
-                 tree_path, confidence, source, embedding)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 tree_path, confidence, source, embedding, embedding_model)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(subject, predicate) DO UPDATE SET
                 updated_at = excluded.updated_at,
                 object_value = excluded.object_value,
                 tree_path = excluded.tree_path,
                 confidence = max(memories.confidence, excluded.confidence),
                 source = excluded.source,
-                embedding = excluded.embedding
+                embedding = excluded.embedding,
+                embedding_model = excluded.embedding_model
             """,
             (
                 now,
@@ -366,7 +492,8 @@ class MemoryStore:
                 tree_path,
                 fact.confidence,
                 fact.source,
-                embedding_to_json(text_embedding(embedding_text)),
+                embedding_to_json(vector),
+                modelo,
             ),
         )
         row = self.get_fact(subject, predicate, mark_used=False)
@@ -413,16 +540,17 @@ class MemoryStore:
             (speaker_id, normalized_question),
         ).fetchone()
         now = now_ts()
-        embedding = embedding_to_json(text_embedding(question))
+        vector, modelo = embedding_for(question)
+        embedding = embedding_to_json(vector)
         if existing is None:
             cursor = self.conn.execute(
                 """
                 INSERT INTO response_cache
                     (created_at, updated_at, speaker_id, question, normalized_question,
-                     answer, embedding, confidence)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     answer, embedding, confidence, embedding_model)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (now, now, speaker_id, question, normalized_question, answer, embedding, confidence),
+                (now, now, speaker_id, question, normalized_question, answer, embedding, confidence, modelo),
             )
             rowid = int(cursor.lastrowid)
         else:
@@ -431,10 +559,10 @@ class MemoryStore:
                 """
                 UPDATE response_cache
                 SET updated_at = ?, question = ?, answer = ?, embedding = ?,
-                    confidence = max(confidence, ?)
+                    confidence = max(confidence, ?), embedding_model = ?
                 WHERE id = ?
                 """,
-                (now, question, answer, embedding, confidence, rowid),
+                (now, question, answer, embedding, confidence, modelo, rowid),
             )
         self.fts_replace("response_cache_fts", rowid, (question, answer, speaker_id))
         self.conn.commit()
@@ -445,7 +573,7 @@ class MemoryStore:
         speaker_id: str = "ricardo",
         threshold: float = SEMANTIC_RESPONSE_THRESHOLD,
     ) -> tuple[str, float] | None:
-        query_vector = text_embedding(text)
+        query_vector, query_model = embedding_for(text)
         lexical_ids: dict[int, float] = {}
         query = fts_query(text)
         if self.fts_enabled and query:
@@ -478,6 +606,10 @@ class MemoryStore:
         best_row: sqlite3.Row | None = None
         best_score = 0.0
         for row in rows:
+            # Vetor de outro modelo não é comparável; contar como 0 daria um
+            # score baixo enganoso em vez de simplesmente ignorar a linha.
+            if row["embedding_model"] != query_model:
+                continue
             embedding_score = cosine_similarity(query_vector, embedding_from_json(row["embedding"]))
             lexical_score = lexical_ids.get(int(row["id"]), 0.0)
             confidence = float(row["confidence"])
@@ -547,7 +679,7 @@ class MemoryStore:
         return [result.row for result in self.hybrid_search_memories(text, limit=limit)]
 
     def hybrid_search_memories(self, text: str, limit: int = 6) -> list[SearchResult]:
-        query_vector = text_embedding(text)
+        query_vector, query_model = embedding_for(text)
         lexical_scores: dict[int, float] = {}
         query = fts_query(text)
         if self.fts_enabled and query:
@@ -588,7 +720,13 @@ class MemoryStore:
         results: list[SearchResult] = []
         for row in rows:
             lexical_score = lexical_scores.get(int(row["id"]), 0.0)
-            embedding_score = cosine_similarity(query_vector, embedding_from_json(row["embedding"]))
+            # Só compara vetores do mesmo modelo; o sinal lexical continua valendo.
+            mesmo_modelo = row["embedding_model"] == query_model
+            embedding_score = (
+                cosine_similarity(query_vector, embedding_from_json(row["embedding"]))
+                if mesmo_modelo
+                else 0.0
+            )
             confidence = float(row["confidence"])
             use_bonus = min(float(row["use_count"]) * 0.015, 0.09)
             has_match_signal = lexical_score > 0.0 or embedding_score >= 0.22

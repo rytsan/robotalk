@@ -19,6 +19,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -41,10 +42,12 @@ import sentiment
 import websockets
 from faster_whisper import WhisperModel
 from memory_store import (
+    MemoryFact,
     MemoryStore,
     answer_from_memory,
     build_memory_context,
     extract_user_facts,
+    normalize_text,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -657,6 +660,186 @@ def call_ollama_llm(user_text: str, memory_context: str = "") -> tuple[str, str]
     return basic_reply(user_text), "fallback"
 
 
+# ============================================================
+# EXTRAÇÃO DE FATOS PELO LLM
+# ============================================================
+#
+# A extração por regex reconhece duas frases ("meu nome é X", "eu gosto de X").
+# Um grafo com dois tipos de fato dentro não melhora resposta nenhuma, então o
+# gargalo da memória não era a busca, era o escritor.
+#
+# Isto roda DEPOIS de a resposta e o áudio já terem sido enviados: o Cardputer
+# está tocando a fala e a latência extra não é percebida.
+
+FACT_EXTRACTION_ENABLED = os.environ.get("ROBO_FACT_EXTRACTION", "1").strip() != "0"
+FACT_MIN_CHARS = 12
+FACT_CONFIDENCE = 0.6            # abaixo dos 0.95 da regex, que ganha no conflito
+
+FACT_SYSTEM_PROMPT = (
+    "Você extrai fatos duráveis sobre o usuário a partir de uma fala em português. "
+    "Responda APENAS com JSON no formato "
+    '{"fatos":[{"predicado":"...","valor":"..."}]}. '
+    "Use predicados curtos em snake_case, como: nome, apelido, idade, cidade, "
+    "profissao, trabalha_em, estuda, gosta_de, nao_gosta_de, tem, "
+    "animal_de_estimacao, objetivo. "
+    "Extraia apenas o que o usuário afirma sobre si mesmo. "
+    "Ignore perguntas, saudações, pedidos de ação e comentários passageiros. "
+    "Não invente nada. Sem fato durável, responda {\"fatos\":[]}."
+)
+
+# Onde cada predicado mora na árvore. Desconhecidos caem em /fatos.
+FACT_TREE = {
+    "nome": "identidade/nome",
+    "apelido": "identidade/apelido",
+    "idade": "identidade/idade",
+    "cidade": "local/cidade",
+    "estado": "local/estado",
+    "pais": "local/pais",
+    "profissao": "trabalho/profissao",
+    "trabalha_em": "trabalho/empresa",
+    "estuda": "trabalho/estudo",
+    "gosta_de": "preferencias/gostos",
+    "nao_gosta_de": "preferencias/desgostos",
+    "tem": "posses",
+    "animal_de_estimacao": "posses/animais",
+    "objetivo": "objetivos",
+}
+
+# Predicados que aceitam vários valores ao mesmo tempo. Como `memories` tem
+# UNIQUE(subject, predicate), cada valor vira um predicado próprio, senão o
+# segundo gosto sobrescreveria o primeiro.
+FACT_MULTIVALORADOS = {"gosta_de", "nao_gosta_de", "tem", "animal_de_estimacao", "objetivo"}
+
+
+def call_ollama_json(system_prompt: str, user_text: str, max_tokens: int = 220) -> dict[str, Any] | None:
+    """Chamada ao Ollama pedindo JSON. Devolve None em qualquer falha."""
+    if not OLLAMA_BASE_URL:
+        return None
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ],
+        "stream": False,
+        "format": "json",                 # o Ollama força saída JSON válida
+        "options": {"temperature": 0.0, "num_predict": max_tokens},
+    }
+
+    req = request.Request(
+        OLLAMA_BASE_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with request.urlopen(req, timeout=OLLAMA_TIMEOUT_S) as response:
+            raw = response.read().decode("utf-8")
+        content = json.loads(raw).get("message", {}).get("content", "")
+        return json.loads(content) if content else None
+    except (error.URLError, OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def limpar_predicado(valor: str) -> str:
+    limpo = re.sub(r"[^a-z0-9_]", "_", normalize_text(valor)).strip("_")
+    limpo = re.sub(r"_+", "_", limpo)
+    return limpo[:32]
+
+
+INTERROGATIVAS = (
+    "qual", "quais", "quem", "quando", "onde", "como", "porque", "por que",
+    "quanto", "quanta", "o que", "que horas",
+)
+
+
+def parece_pergunta(texto: str) -> bool:
+    normalizado = normalize_text(texto)
+    return normalizado.endswith("?") or normalizado.startswith(INTERROGATIVAS)
+
+
+def valor_ancorado(valor: str, texto_usuario: str) -> bool:
+    """O valor precisa aparecer na fala do usuário.
+
+    Trava contra alucinação: sem isto, `"Qual é a capital da França?"` produzia
+    `capital = "Lisboa"` — pergunta virando fato, e ainda com resposta errada.
+    Se o modelo devolve algo que o usuário não disse, ele inventou.
+    """
+    return normalize_text(valor) in normalize_text(texto_usuario)
+
+
+def extract_facts_with_llm(user_text: str, speaker_id: str) -> list[MemoryFact]:
+    if not FACT_EXTRACTION_ENABLED or len(user_text.strip()) < FACT_MIN_CHARS:
+        return []
+
+    # Pergunta não afirma nada sobre o usuário, e é onde o modelo mais inventa.
+    if parece_pergunta(user_text):
+        return []
+
+    data = call_ollama_json(FACT_SYSTEM_PROMPT, user_text)
+    if not isinstance(data, dict):
+        return []
+
+    itens = data.get("fatos")
+    if not isinstance(itens, list):
+        return []
+
+    facts: list[MemoryFact] = []
+    for item in itens[:8]:                       # teto contra alucinação em série
+        if not isinstance(item, dict):
+            continue
+
+        predicado = limpar_predicado(str(item.get("predicado", "")))
+        valor = str(item.get("valor", "")).strip()
+
+        if not predicado or not valor or len(valor) > 120:
+            continue
+
+        # Vocabulário fechado: predicado fora da árvore é invenção do modelo.
+        if predicado not in FACT_TREE:
+            print(f"Fato descartado (predicado desconhecido): {predicado} = {valor!r}")
+            continue
+
+        if not valor_ancorado(valor, user_text):
+            print(f"Fato descartado (não dito pelo usuário): {predicado} = {valor!r}")
+            continue
+
+        chave = predicado
+        if predicado in FACT_MULTIVALORADOS:
+            chave = f"{predicado}:{normalize_text(valor)[:48]}"
+
+        facts.append(
+            MemoryFact(
+                subject=speaker_id,
+                predicate=chave,
+                object_value=valor,
+                tree_path=f"/pessoas/{speaker_id}/{FACT_TREE[predicado]}",
+                confidence=FACT_CONFIDENCE,
+                source="llm",
+            )
+        )
+
+    return facts
+
+
+def aprender_da_fala(transcription: str) -> None:
+    """Roda depois da resposta, no tempo em que o Cardputer está tocando o áudio."""
+    if memory_store is None:
+        return
+
+    try:
+        facts = extract_facts_with_llm(transcription, DEFAULT_SPEAKER_ID)
+    except Exception as exc:
+        print(f"Extração de fatos falhou: {exc}")
+        return
+
+    for fact in facts:
+        memory_store.upsert_fact(fact)
+        print(f"Fato aprendido (llm): {fact.predicate} = {fact.object_value}")
+
+
 def generate_reply(transcription: str) -> str:
     started_at = time.time()
 
@@ -807,6 +990,11 @@ async def handle_saved_recording(websocket: Any, raw_data: bytes, sample_rate: i
         except Exception as error:
             print(f"Erro gerando TTS: {error}")
             await send_text(websocket, f"MSG Erro no TTS: {error}")
+
+    # Aprendizado por último, de propósito: o áudio já foi enviado e o Cardputer
+    # está tocando a resposta, então esta chamada ao LLM não custa espera nenhuma
+    # para o usuário.
+    await asyncio.to_thread(aprender_da_fala, transcription)
 
 
 async def handle_client(websocket: Any) -> None:
