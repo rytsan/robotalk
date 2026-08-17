@@ -553,6 +553,53 @@ def build_llm_messages(user_text: str, memory_context: str = "") -> list[dict[st
     return messages
 
 
+def ollama_root() -> str:
+    """http://127.0.0.1:11434/api/chat -> http://127.0.0.1:11434"""
+    index = OLLAMA_BASE_URL.find("/api/")
+    return OLLAMA_BASE_URL[:index] if index > 0 else OLLAMA_BASE_URL.rstrip("/")
+
+
+def check_ollama() -> tuple[bool, str]:
+    """Confere se o Ollama responde e se o modelo configurado está instalado.
+
+    Distinguir "não respondeu" de "respondeu sem o modelo" importa: os dois
+    caem no mesmo fallback silencioso, mas a correção é diferente.
+    """
+    if not OLLAMA_BASE_URL:
+        return False, "ROBO_OLLAMA_BASE_URL está vazio; LLM desligado por configuração."
+
+    url = f"{ollama_root()}/api/tags"
+    try:
+        with request.urlopen(url, timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except error.URLError as exc:
+        return False, f"não respondeu em {url} ({exc.reason}). O Ollama está rodando?"
+    except Exception as exc:
+        return False, f"resposta inesperada de {url}: {exc}"
+
+    models = [str(item.get("name", "")) for item in data.get("models", [])]
+
+    if not models:
+        return False, f"respondeu, mas não há modelo instalado. Rode: ollama pull {OLLAMA_MODEL}"
+
+    if OLLAMA_MODEL not in models:
+        return False, (
+            f"respondeu, mas '{OLLAMA_MODEL}' não está instalado. "
+            f"Instalados: {', '.join(models)}. Rode: ollama pull {OLLAMA_MODEL}"
+        )
+
+    return True, f"{ollama_root()} respondendo, modelo '{OLLAMA_MODEL}' pronto ({len(models)} instalado(s))."
+
+
+def print_ollama_status() -> None:
+    ok, detail = check_ollama()
+    if ok:
+        print(f"LLM OK: {detail}")
+        return
+    print(f"LLM INDISPONÍVEL: {detail}")
+    print("        As respostas usarão o fallback local até isso ser resolvido.")
+
+
 def call_ollama_llm(user_text: str, memory_context: str = "") -> tuple[str, str]:
     if not OLLAMA_BASE_URL:
         return basic_reply(user_text), "fallback"
@@ -574,10 +621,24 @@ def call_ollama_llm(user_text: str, memory_context: str = "") -> tuple[str, str]
     }
 
     req = request.Request(OLLAMA_BASE_URL, data=body, headers=headers, method="POST")
+    started_at = time.time()
 
     try:
         with request.urlopen(req, timeout=OLLAMA_TIMEOUT_S) as response:
             raw = response.read().decode("utf-8")
+    except error.HTTPError as exc:
+        # HTTPError é subclasse de URLError e precisa vir antes. Sem isso, um
+        # "modelo não encontrado" (HTTP 404) era relatado como "Ollama
+        # indisponível", mandando investigar a coisa errada: o Ollama está no ar,
+        # só o nome do modelo é que não confere.
+        detalhe = ""
+        try:
+            detalhe = exc.read().decode("utf-8", errors="ignore").strip()
+        except Exception:
+            pass
+        print(f"Ollama recusou a requisição (HTTP {exc.code}): {detalhe or exc.reason}")
+        print(f"        Modelo pedido: '{OLLAMA_MODEL}'. Confira com: ollama list")
+        return basic_reply(user_text), "fallback"
     except error.URLError as exc:
         print(f"Ollama indisponível, usando fallback local: {exc}")
         return basic_reply(user_text), "fallback"
@@ -587,7 +648,9 @@ def call_ollama_llm(user_text: str, memory_context: str = "") -> tuple[str, str]
         message = data.get("message", {})
         content = str(message.get("content", "")).strip()
         if content:
+            print(f"Ollama respondeu em {time.time() - started_at:.2f}s ({OLLAMA_MODEL}).")
             return content, "ollama"
+        print("Ollama respondeu com conteúdo vazio; usando fallback local.")
     except Exception as exc:
         print(f"Falha ao interpretar resposta do Ollama: {exc}")
 
@@ -595,10 +658,13 @@ def call_ollama_llm(user_text: str, memory_context: str = "") -> tuple[str, str]
 
 
 def generate_reply(transcription: str) -> str:
+    started_at = time.time()
+
     if memory_store is None:
-        reply, _source = call_ollama_llm(transcription)
+        reply, source = call_ollama_llm(transcription)
         remember_turn("user", transcription)
         remember_turn("assistant", reply)
+        print(f"Resposta via {source} em {time.time() - started_at:.2f}s (sem memória).")
         return reply
 
     memory_store.add_turn("user", transcription, speaker_id=DEFAULT_SPEAKER_ID)
@@ -609,12 +675,12 @@ def generate_reply(transcription: str) -> str:
     fast_reply = answer_from_memory(transcription, memory_store, speaker_id=DEFAULT_SPEAKER_ID)
     if fast_reply:
         reply = fast_reply
-        print("Resposta gerada pela memória local, sem Ollama.")
+        source = "memória local"
     else:
         cached = memory_store.semantic_cached_response(transcription, speaker_id=DEFAULT_SPEAKER_ID)
         if cached:
             reply, score = cached
-            print(f"Resposta gerada pelo cache semântico, sem Ollama. Score={score:.2f}")
+            source = f"cache semântico (score {score:.2f})"
         else:
             memory_context = build_memory_context(memory_store, transcription)
             reply, source = call_ollama_llm(transcription, memory_context)
@@ -629,6 +695,10 @@ def generate_reply(transcription: str) -> str:
     memory_store.add_turn("assistant", reply, speaker_id="assistant")
     remember_turn("user", transcription)
     remember_turn("assistant", reply)
+
+    # Uma linha por resposta dizendo de onde ela veio. Antes so havia log nos
+    # atalhos, entao "Ollama" e "fallback local" eram indistinguiveis no console.
+    print(f"Resposta via {source} em {time.time() - started_at:.2f}s.")
     return reply
 
 
@@ -832,7 +902,7 @@ async def console_loop() -> None:
     print("  say texto")
     print("  auto_tts on")
     print("  auto_tts off")
-    print("  llm on/off via ROBO_OLLAMA_BASE_URL")
+    print("  llm            testa a conexao com o Ollama agora")
     print("  ping")
     print()
 
@@ -855,6 +925,11 @@ async def console_loop() -> None:
         if command == "auto_tts off":
             AUTO_TTS_REPLY = False
             print("AUTO_TTS_REPLY = False")
+            continue
+
+        # Nao depende de Cardputer conectado: e diagnostico do servidor.
+        if command == "llm":
+            await asyncio.to_thread(print_ollama_status)
             continue
 
         websocket = active_websocket
@@ -904,6 +979,11 @@ async def main() -> None:
         compute_type=WHISPER_COMPUTE_TYPE,
     )
     print("faster-whisper carregado.")
+
+    # Checa o LLM no boot: sem isto, um Ollama fora do ar so aparecia como
+    # respostas estranhas, porque o fallback local responde sem reclamar.
+    await asyncio.to_thread(print_ollama_status)
+
     print(f"Servidor em ws://{HOST}:{PORT}")
 
     send_lock = asyncio.Lock()

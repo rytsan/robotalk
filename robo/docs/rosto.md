@@ -15,6 +15,18 @@ Separar os dois foi necessário porque antes o humor sequestrava a cor: com `EMO
 
 Agora dá para ver as duas coisas ao mesmo tempo: rosto amarelo com olhos tristes é "o robô está pensando e percebeu que você está mal".
 
+### Regra de geometria da boca
+
+Tudo que a boca desenha precisa caber dentro de `MOUTH_BOX`, porque essa caixa é a única região que `drawMouth()` limpa. O que passar dela **nunca é apagado** e vira uma segunda boca permanente na tela.
+
+```text
+caixa de limpeza : y 72 .. 105
+borda da cabeca  : y 106 .. 107   <- a caixa nao pode alcancar
+olhos (desenho)  : ate y 69
+```
+
+Foi exatamente esse o defeito do sorriso original: arco de raio 24 centrado em `MOUTH_CY - 4` descia até y 107, deixando resíduo de y 102 a 107 e encostando na borda da cabeça. O `STATE_SPEAKING` tem trava de altura por isso — um visema mais alto que a caixa deixaria rastro.
+
 ### Estados (cor)
 
 | Estado | Cor | Rodapé |

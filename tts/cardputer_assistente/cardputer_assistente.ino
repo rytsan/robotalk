@@ -123,7 +123,11 @@ using namespace websockets;
 #define MOUTH_BOX_X 78
 #define MOUTH_BOX_Y 72
 #define MOUTH_BOX_W 84
-#define MOUTH_BOX_H 30
+// A caixa precisa cobrir TODA boca desenhada, senao o que passar dela nunca e
+// apagado e vira uma segunda boca na tela. Limite inferior: a borda de baixo da
+// cabeca ocupa y 106-107, entao a limpeza pode ir ate 105.
+#define MOUTH_BOX_H 34               // y 72..105
+#define MOUTH_MAX_Y (MOUTH_BOX_Y + MOUTH_BOX_H - 1)
 
 // rodape de status
 #define STATUS_Y    110
@@ -1805,8 +1809,11 @@ void drawMouth() {
   switch (currentState) {
     case STATE_IDLE:                            // boca neutra
       if (currentMood == MOOD_HAPPY || currentMood == MOOD_EXCITED) {
-        d.drawArc(MOUTH_CX, MOUTH_CY - 4, 24, 14, 20, 160, col);
-        d.drawArc(MOUTH_CX, MOUTH_CY - 3, 24, 14, 20, 160, col);
+        // Centro em CY-6 com raio 22 desce ate y 103, dentro da caixa (105).
+        // Antes era CY-4 com raio 24: descia ate 107, deixava residuo abaixo da
+        // limpeza e encostava na borda da cabeca.
+        d.drawArc(MOUTH_CX, MOUTH_CY - 6, 22, 13, 20, 160, col);
+        d.drawArc(MOUTH_CX, MOUTH_CY - 5, 22, 13, 20, 160, col);
       } else if (currentMood == MOOD_SAD || currentMood == MOOD_CONCERNED) {
         d.drawArc(MOUTH_CX, MOUTH_CY + 9, 22, 12, 200, 340, col);
         d.drawArc(MOUTH_CX, MOUTH_CY + 10, 22, 12, 200, 340, col);
@@ -1832,6 +1839,13 @@ void drawMouth() {
     case STATE_SPEAKING: {                      // forma vinda do visema atual
       int h = (mouthH < 3) ? 3 : mouthH;
       int w = (mouthW < 8) ? 8 : mouthW;
+
+      // Trava dentro da caixa de limpeza. Um visema mais alto que a caixa
+      // deixaria rastro permanente na tela.
+      int maxH = 2 * min(MOUTH_CY - MOUTH_BOX_Y, MOUTH_MAX_Y - MOUTH_CY);
+      if (h > maxH) h = maxH;
+      if (w > MOUTH_BOX_W - 2) w = MOUTH_BOX_W - 2;
+
       int r = (h < 6) ? (h / 2) : 5;            // raio > h/2 renderiza torto
       d.fillRoundRect(MOUTH_CX - w / 2, MOUTH_CY - h / 2, w, h, r, col);
       break;

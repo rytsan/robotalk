@@ -80,6 +80,38 @@
 - **Sintoma**: o humor não muda entre interações.
 - **Verificar**: o console do servidor imprime `Sentimento: <HUMOR> (val=... aro=... conf=... hits=...)` a cada fala. Se `hits=0`, nenhuma palavra do léxico foi reconhecida e o resultado é `NEUTRAL` por padrão. Ver `sentimento.md`.
 
+### O robô responde "Eu ouvi: ..." em vez de conversar
+
+- **Sintoma**: a resposta é sempre um eco do que você falou.
+- **Causa**: isso é o `basic_reply`, o fallback local. Significa que o Ollama não foi usado.
+- **Verificar**: no console do servidor, digite `llm`. Ele diz se o Ollama responde e se o modelo configurado está instalado.
+- **Causa mais comum**: o nome do modelo não confere. `ollama list` mostra o que existe de fato; repare que `qwen2.5:1.5b` e `qwen2.5:1.5b-instruct` são nomes diferentes, e pedir o que não existe devolve HTTP 404.
+- **Solução**: instalar o modelo esperado com `ollama pull qwen2.5:1.5b-instruct`, ou apontar o servidor para um que já exista:
+
+```bash
+export ROBO_OLLAMA_MODEL="qwen2.5:1.5b"
+bash run_server.sh
+```
+
+### De onde veio cada resposta
+
+O console imprime uma linha por resposta:
+
+```text
+Resposta via ollama em 1.84s.
+Resposta via memória local em 0.01s.
+Resposta via cache semântico (score 0.91) em 0.02s.
+Resposta via fallback em 0.00s.
+```
+
+`fallback` significa que o Ollama não foi usado. `memória local` e `cache semântico` são atalhos propositais, que respondem sem chamar o LLM — não são defeito.
+
+### A boca some ou aparece uma segunda boca
+
+- **Sintoma**: resíduo de boca abaixo da boca atual, ou uma linha atravessando a parte de baixo da cabeça.
+- **Causa**: alguma forma de boca desenhando fora de `MOUTH_BOX`. O que passa da caixa nunca é apagado.
+- **Regra**: toda boca precisa caber em `y MOUTH_BOX_Y .. MOUTH_BOX_Y + MOUTH_BOX_H - 1`, e a caixa não pode alcançar a borda inferior da cabeça (y 106-107). Ver `rosto.md`.
+
 ## Regra prática
 
 Se algo estranho acontecer no fluxo de áudio, primeiro verificar:
@@ -97,3 +129,9 @@ Se o problema for de rede, verificar:
 2. isolamento de cliente na rede;
 3. credencial salva na NVS (tecla `W` mostra a rede atual);
 4. URL manual do servidor sobrepondo a descoberta.
+
+Se as respostas parecerem burras, verificar:
+
+1. `llm` no console do servidor;
+2. `ollama list` conferindo o nome exato do modelo;
+3. a linha `Resposta via ...` de cada resposta.
