@@ -94,7 +94,26 @@ CONVERSATION_SYSTEM_PROMPT = (
     "Você é o cérebro de um robô experimental em português do Brasil. "
     "Responda de forma curta, natural e útil. "
     "Se a entrada for ambígua, faça uma resposta simples e objetiva. "
-    "Se o usuário pedir ações do robô, explique em uma frase o que será feito."
+    "Se o usuário pedir ações do robô, explique em uma frase o que será feito. "
+    "Você não tem acesso à internet nem a sensores externos. "
+    "Fora a data e a hora informadas abaixo, não invente informação em tempo "
+    "real: se não souber, diga que não sabe."
+)
+
+DIAS_SEMANA = (
+    "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
+    "sexta-feira", "sábado", "domingo",
+)
+MESES = (
+    "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+    "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+)
+
+# Perguntas cuja resposta envelhece. Reaproveitar do cache devolveria a hora
+# de horas atrás como se fosse agora.
+TEMPO_PATTERN = re.compile(
+    r"\b(que horas|hora certa|horas sao|que dia|dia de hoje|data de hoje|"
+    r"hoje e|em que ano|que mes|que semana)\b"
 )
 
 whisper_model: WhisperModel | None = None
@@ -568,8 +587,29 @@ def remember_turn(role: str, content: str) -> None:
         del conversation_history[:-OLLAMA_HISTORY_LIMIT * 2]
 
 
+def contexto_temporal() -> str:
+    """Data e hora do Raspberry, em português.
+
+    Sem isto todo modelo testado inventava um horário quando perguntado, sem
+    nem avisar. O Pi tem relógio: é mais simples informar do que instruir a
+    recusar. Os nomes vêm de tabela própria porque `strftime('%A')` depende do
+    locale, que num Raspberry recém-instalado costuma ser inglês.
+    """
+    agora = time.localtime()
+    return (
+        f"Agora são {time.strftime('%H:%M', agora)} de "
+        f"{DIAS_SEMANA[agora.tm_wday]}, {agora.tm_mday} de "
+        f"{MESES[agora.tm_mon - 1]} de {agora.tm_year}."
+    )
+
+
+def pergunta_sobre_tempo(texto: str) -> bool:
+    return bool(TEMPO_PATTERN.search(normalize_text(texto)))
+
+
 def build_llm_messages(user_text: str, memory_context: str = "") -> list[dict[str, str]]:
     messages = [{"role": "system", "content": CONVERSATION_SYSTEM_PROMPT}]
+    messages.append({"role": "system", "content": contexto_temporal()})
     if memory_context:
         messages.append({"role": "system", "content": memory_context})
     messages.extend(conversation_history[-OLLAMA_HISTORY_LIMIT * 2 :])
@@ -876,19 +916,26 @@ def generate_reply(transcription: str) -> str:
         memory_store.upsert_fact(fact)
         print(f"Memória atualizada: {fact.subject} {fact.predicate} = {fact.object_value}")
 
+    # Resposta que envelhece não pode passar pelo cache, nem entrar nele: a hora
+    # de agora viraria a hora de sempre.
+    perecivel = pergunta_sobre_tempo(transcription)
+
     fast_reply = answer_from_memory(transcription, memory_store, speaker_id=DEFAULT_SPEAKER_ID)
     if fast_reply:
         reply = fast_reply
         source = "memória local"
     else:
-        cached = memory_store.semantic_cached_response(transcription, speaker_id=DEFAULT_SPEAKER_ID)
+        cached = (
+            None if perecivel
+            else memory_store.semantic_cached_response(transcription, speaker_id=DEFAULT_SPEAKER_ID)
+        )
         if cached:
             reply, score = cached
             source = f"cache semântico (score {score:.2f})"
         else:
             memory_context = build_memory_context(memory_store, transcription)
             reply, source = call_ollama_llm(transcription, memory_context)
-            if source == "ollama":
+            if source == "ollama" and not perecivel:
                 memory_store.add_response_cache(
                     transcription,
                     reply,

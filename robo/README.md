@@ -214,7 +214,17 @@ O `qwen3.5` é modelo de raciocínio e devolve conteúdo vazio pela API de chat;
 
 O gemma afinado para pt-BR responde de forma mais natural e mais curta, que é o que este robô pede, e ainda foi o mais rápido. Ele responde com emoji: o servidor remove antes de mandar para a tela e para o Piper, porque o Cardputer usa fonte ASCII e o Piper não fala emoji.
 
-Nenhum modelo sabe que horas são, e todos inventam um horário quando perguntados. Isso é limitação do system prompt, não do modelo.
+### Data e hora
+
+Todo modelo testado inventava um horário quando perguntado, sem avisar. O Raspberry tem relógio, então o servidor injeta data e hora em cada turno:
+
+```text
+Agora são 15:55 de segunda-feira, 17 de agosto de 2026.
+```
+
+O prompt também diz que o robô não tem internet nem sensores externos e deve admitir quando não sabe. Com isso, `Qual a previsão do tempo amanhã?` passa a ser respondido com "não tenho essa informação" em vez de um palpite inventado.
+
+Perguntas sobre data e hora **não entram no cache semântico** e não são respondidas por ele. Sem essa exceção, a hora de agora ficaria gravada e seria devolvida horas depois como se ainda valesse.
 
 Se o Ollama falhar, o servidor usa um fallback local simples para manter o fluxo funcionando. Para saber qual dos dois está em uso, digite `llm` no console ou olhe a linha `Resposta via ...` de cada resposta.
 
