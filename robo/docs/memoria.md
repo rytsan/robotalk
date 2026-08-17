@@ -123,3 +123,4 @@ Para reconhecimento de voz real, o próximo passo é criar um fluxo de cadastro:
 - Adicionar memória episódica: eventos com data, local e participantes.
 - Adicionar confirmação antes de salvar fatos sensíveis.
 - Implementar cadastro e reconhecimento de speaker.
+- Persistir `valence` e `arousal` por turno em `conversation_turns`, usando o mesmo `ensure_column()` que já faz migração incremental. Isso abriria recuperação enviesada por humor e falas como "você parecia chateado ontem". Ver `sentimento.md`.

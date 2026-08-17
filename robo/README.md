@@ -10,18 +10,22 @@ O ciclo principal já está implementado de ponta a ponta:
 2. O usuário salva e envia o snapshot pelo WebSocket.
 3. O servidor salva os arquivos de áudio, converte para Whisper e transcreve.
 4. O texto transcrito é enviado para o Ollama local.
-5. O servidor envia a transcrição e a resposta ao Cardputer.
-6. Se `auto_tts` estiver ligado, o servidor sintetiza a resposta com Piper e manda o PCM de volta.
-7. O Cardputer salva o áudio recebido no SD e toca no speaker.
+5. O servidor analisa o sentimento da fala e manda a emoção para o rosto.
+6. O servidor envia a transcrição e a resposta ao Cardputer.
+7. Se `auto_tts` estiver ligado, o servidor sintetiza a resposta com Piper e manda o PCM de volta.
+8. O Cardputer salva o áudio recebido no SD e toca no speaker, com a boca dirigida pelo áudio.
 
 ## Componentes
 
 - `server/robo_server.py`: servidor Python persistente no Raspberry.
-- `cardputer/firmware/cardputer_robot_lab/cardputer_robot_lab.ino`: firmware do Cardputer.
+- `server/memory_store.py`: memória persistente híbrida em SQLite.
+- `server/sentiment.py`: análise de sentimento da fala do usuário.
+- `../tts/cardputer_assistente.ino`: firmware principal do Cardputer.
+- `cardputer/firmware/cardputer_robot_lab/cardputer_robot_lab.ino`: firmware mínimo para depuração.
 - `server/voices/`: voz Piper usada para TTS.
 - `server/mic_tests/`: capturas de microfone salvas pelo servidor.
 - `server/tts_out/`: textos, WAVs e RAWs gerados pelo Piper.
-- `docs/`: notas de arquitetura, workflow, setup e troubleshooting.
+- `docs/`: notas de arquitetura, workflow, setup, rosto, sentimento, memória, discovery e troubleshooting.
 - `scripts/`: utilitários para conversão e testes isolados.
 
 ## Servidor
@@ -46,19 +50,18 @@ O servidor escuta em:
 ws://0.0.0.0:8765
 ```
 
-Ele também suporta UDP discovery na porta `8766`, para firmware com descoberta dinâmica:
+Ele também faz descoberta por UDP na porta `8766`, em duas vias:
 
 ```text
-RDISCOVER <nonce> -> ROBOT ws://<ip_do_raspberry>:8765 <hmac>
+ativa:   RDISCOVER <nonce> -> ROBOT ws://<ip_do_raspberry>:8765 <hmac>
+passiva: beacon periodico em broadcast, ligado por padrao
 ```
 
 Mais detalhes: `docs/discovery.md`.
 
-No firmware, configure `WS_URL` com o IP real do Raspberry, por exemplo:
+Não é preciso configurar IP no firmware. O Cardputer descobre o servidor sozinho; o `WS_URL` compilado é apenas o último recurso.
 
-```cpp
-const char* WS_URL = "ws://192.168.1.100:8765";
-```
+O que precisa bater entre os dois lados é o segredo compartilhado: `ROBOT_SECRET` no `.ino` e `ROBO_DISCOVERY_TOKEN` no servidor.
 
 ## Console do servidor
 
@@ -76,26 +79,16 @@ No código atual, `AUTO_TTS_REPLY` começa como `True`.
 
 Há dois sketches no workspace:
 
-- `tts/cardputer_assistente.ino`: aparenta ser o firmware mais novo. O cabeçalho marca `v2.0`, cita correção de memória do Cardputer sem PSRAM, usa playback pelo SD em chunks e tem interface animada.
-- `robo/cardputer/firmware/cardputer_robot_lab/cardputer_robot_lab.ino`: firmware mais simples, documentado inicialmente dentro do projeto `robo/`.
+- `tts/cardputer_assistente.ino`: **firmware principal**. Rosto animado, lip sync por visema, configuração de rede pelo teclado e descoberta do servidor.
+- `robo/cardputer/firmware/cardputer_robot_lab/cardputer_robot_lab.ino`: versão mínima, útil para depurar protocolo e áudio isoladamente.
 
-Para retomar do ponto mais provável do último desenvolvimento, comece por:
+Antes de gravar, o único valor a conferir é o segredo compartilhado:
 
-```text
-/home/ricardo/robo/tts/cardputer_assistente.ino
+```cpp
+#define ROBOT_SECRET "TROQUE_ESTE_SEGREDO_COMPARTILHADO"
 ```
 
-Se quiser uma versão mínima para depurar protocolo e áudio, use:
-
-```text
-/home/ricardo/robo/robo/cardputer/firmware/cardputer_robot_lab/cardputer_robot_lab.ino
-```
-
-Antes de gravar, ajuste:
-
-- `WIFI_SSID`
-- `WIFI_PASS`
-- `WS_URL`
+SSID, senha e endereço do servidor são configurados no próprio aparelho, pela tecla `W`, e ficam salvos na NVS. No primeiro boot a tela abre sozinha. Detalhes em `docs/cardputer_setup.md`.
 
 Bibliotecas/pacotes no Arduino IDE:
 
@@ -106,9 +99,31 @@ Bibliotecas/pacotes no Arduino IDE:
 
 Controles no teclado:
 
-- `R`: inicia ou para a gravação circular em RAM.
+- `R` ou `Espaço`: inicia ou para a gravação circular em RAM.
 - `S`: quando a gravação está ativa, para, salva `SD:/mic_ring.raw` e envia ao servidor.
 - `P`: envia `PING`.
+- `W`: abre a configuração de rede.
+
+## Rosto
+
+O rosto usa dois canais independentes:
+
+- **forma** dos olhos e da boca: emoção detectada no usuário, recebida via `EMO`;
+- **cor** do rosto: estado do robô (`Pronto`, `Ouvindo`, `Pensando`, `Falando`, `ERRO`), derivado localmente.
+
+Durante a fala, a boca é dirigida pelo áudio em janelas de 20 ms, usando energia e taxa de cruzamento por zero para escolher entre seis visemas. Mais detalhes: `docs/rosto.md`.
+
+## Análise de sentimento
+
+O servidor classifica a fala do usuário e envia `EMO <HUMOR>` ao Cardputer. A classificação usa léxico português embutido, com valência contínua, arousal separado, negação e intensificadores. Sem dependência nova e sem latência extra.
+
+Para ampliar o vocabulário com um léxico externo:
+
+```bash
+export ROBO_SENTIMENT_LEXICON="/caminho/oplexicon_v3.0.txt"
+```
+
+Mais detalhes: `docs/sentimento.md`.
 
 ## Formatos de áudio
 
@@ -128,6 +143,8 @@ Saída do servidor para o Cardputer:
 - chunks de 1024 bytes
 - delimitado por `PLAY_START` e `PLAY_END`
 
+No Cardputer, a reprodução lê do SD em blocos de 1920 amostras (120 ms), com buffer duplo para não deixar buraco entre blocos.
+
 ## Protocolo WebSocket
 
 Mensagens de texto:
@@ -137,8 +154,12 @@ Mensagens de texto:
 - `RECORD_END`: fim do envio de áudio capturado.
 - `RECORDING`: confirmação do servidor.
 - `MSG ...`: texto mostrado na tela do Cardputer.
+- `EMO <HUMOR>`: emoção detectada na fala do usuário; muda a forma do rosto.
 - `SAY ...`: comando que pode ser enviado pelo Cardputer ao servidor para TTS direto.
 - `PLAY_START` / `PLAY_END`: início e fim de áudio TTS enviado pelo servidor.
+- `HELLO_CARDPUTER` / `HELLO_ROBO`: handshake opcional com prova do segredo.
+
+Humores aceitos em `EMO`: `NEUTRAL`, `HAPPY`, `SAD`, `CONFUSED`, `EXCITED`, `CONCERNED`. O rótulo é comparado por igualdade exata, então acrescentar argumentos quebraria a leitura.
 
 Mensagens binárias:
 
