@@ -58,6 +58,13 @@
 - **Observação**: nada é salvo quando a conexão falha, então a configuração anterior continua intacta.
 - **Solução**: a senha aparece em texto claro na tela justamente para conferência. Verificar maiúsculas e o uso da tecla `Shift`.
 
+### Não consigo entrar na tela de configuração
+
+- **Sintoma**: apertar `W` não abre nada, ou abre um menu embaralhado com o rosto do robô por cima.
+- **Escape garantido**: **segure `W` enquanto liga o Cardputer**. Isso força a configuração antes de qualquer tentativa de rede.
+- **Se o Wi-Fi não conectar**, a configuração agora abre sozinha depois do timeout. Não é mais preciso adivinhar.
+- **Durante os 15 s de conexão**, `W` também funciona: o rodapé mostra `Conectando... (W = config)`.
+
 ### Não consigo voltar na tela de configuração
 
 - **Sintoma**: `Ctrl` não sai da tela.

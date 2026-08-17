@@ -53,7 +53,12 @@ Abra um desses arquivos diretamente na Arduino IDE.
 
 Se você abriu o firmware mínimo (`cardputer_robot_lab.ino`), ele não tem essa tela: lá o `WIFI_SSID`, o `WIFI_PASS` e o `WS_URL` ainda precisam ser editados no topo do arquivo antes de gravar.
 
-No primeiro boot, se nunca houve configuração salva e o `WIFI_SSID` ainda for o placeholder `SUA_REDE`, o firmware abre a tela de configuração sozinho. Depois disso, a tecla `W` reabre a tela a qualquer momento.
+A tela de configuração abre em quatro situações:
+
+- **Segurando `W` ao ligar** — escape garantido, funciona mesmo com rede salva e funcionando;
+- **No primeiro boot**, se nunca houve configuração salva e o `WIFI_SSID` ainda for o placeholder `SUA_REDE`;
+- **Quando o Wi-Fi não conecta** dentro do timeout, em vez de ficar tentando para sempre;
+- **Apertando `W`** durante a operação normal, ou durante os 15 s de conexão.
 
 Os `#define WIFI_SSID` / `WIFI_PASS` / `WS_URL` continuam no código, mas passaram a ser apenas padrão de fábrica: o que estiver salvo na NVS sempre vence.
 

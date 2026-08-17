@@ -97,6 +97,7 @@ using namespace websockets;
 
 // --- Tempos ---
 #define WS_RETRY_MS       5000      // intervalo de reconexao WebSocket
+#define WIFI_CONNECT_TIMEOUT_MS 15000  // espera maxima por WL_CONNECTED
 #define BAT_UPDATE_MS     15000     // atualizacao da bateria
 #define SPEAKER_VOLUME    200       // 0-255
 
@@ -259,6 +260,8 @@ bool sdOk = false;
 
 /* ====================== PROTOTIPOS DE FUNCAO ======================== */
 void conectarWifi();
+bool pedidoDeConfig();
+bool esperarWifi(unsigned long timeoutMs);
 void iniciarSD();
 void configurarWebSocket();
 void conectarWebSocket();
@@ -387,14 +390,33 @@ void setup() {
 
   nextBlinkMs = millis() + 3000;
 
+  // Escape de boot: segurando W na ligacao, entra direto na configuracao.
+  // Vale mesmo com credencial salva e rede funcionando.
+  M5Cardputer.update();
+  bool forcarConfig = false;
+  if (M5Cardputer.Keyboard.isPressed()) {
+    Keyboard_Class::KeysState st = M5Cardputer.Keyboard.keysState();
+    for (auto c : st.word) if (tolower(c) == 'w') forcarConfig = true;
+  }
+
   // Sem credencial salva e com o SSID ainda no placeholder de fabrica, tentar
   // conectar so gastaria 15 s ate falhar. Abre a configuracao direto.
-  if (!temConfigWifi()) {
+  if (forcarConfig || !temConfigWifi()) {
     setupEnter();
     return;
   }
 
   conectarWifi();
+
+  // conectarWifi() pode ter aberto a configuracao a pedido do usuario
+  if (setupScreen != SETUP_OFF) return;
+
+  // Sem rede nao ha o que descobrir. Em vez de cair num ciclo de retry que
+  // nunca vai dar certo, abre a configuracao: e o que o usuario precisa aqui.
+  if (WiFi.status() != WL_CONNECTED) {
+    setupEnter();
+    return;
+  }
 
   // v2.1: tenta descobrir o servidor antes de conectar; fallback fica no conectarWebSocket
   if (descobrirServidor()) {
@@ -420,6 +442,14 @@ void loop() {
   }
 
   lerTeclado();
+
+  // lerTeclado() pode ter aberto a configuracao (tecla W). Sem este return, a
+  // mesma iteracao seguia para a rede e para animateRobotFace()/drawBattery(),
+  // que desenhavam o rosto por cima do menu recem-desenhado.
+  if (setupScreen != SETUP_OFF) {
+    delay(5);
+    return;
+  }
 
   if (gravando) {
     /* ---- TRECHO CRITICO: so captura microfone ----
@@ -485,16 +515,47 @@ bool temConfigWifi() {
 }
 
 /* ========================= WI-FI ==================================== */
+
+// Le o teclado no meio de uma espera longa e diz se W foi pedido.
+// Sem isto, um toque em W durante os 15 s de conexao era perdido: o teclado
+// so e amostrado quando M5Cardputer.update() roda, e ele nao rodava aqui.
+bool pedidoDeConfig() {
+  M5Cardputer.update();
+  if (!M5Cardputer.Keyboard.isChange())  return false;
+  if (!M5Cardputer.Keyboard.isPressed()) return false;
+
+  Keyboard_Class::KeysState st = M5Cardputer.Keyboard.keysState();
+  for (auto c : st.word) {
+    if (tolower(c) == 'w') return true;
+  }
+  return false;
+}
+
+// Espera a conexao. Devolve false se o usuario pediu a configuracao no meio.
+bool esperarWifi(unsigned long timeoutMs) {
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeoutMs) {
+    if (pedidoDeConfig()) return false;
+    delay(30);
+  }
+  return true;
+}
+
 void conectarWifi() {
   String ssid = cfgSsid.length() ? cfgSsid : String(WIFI_SSID);
   String pass = cfgPass.length() ? cfgPass : String(WIFI_PASS);
 
+  snprintf(msgLine, sizeof(msgLine), "Conectando... (W = config)");
+  drawMsgLine();
+
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid.c_str(), pass.c_str());
-  unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
-    delay(200);
+
+  if (!esperarWifi(WIFI_CONNECT_TIMEOUT_MS)) {
+    setupEnter();                    // usuario pediu a config durante a espera
+    return;
   }
+
   if (WiFi.status() == WL_CONNECTED) {
     snprintf(msgLine, sizeof(msgLine), "WiFi OK %s", WiFi.localIP().toString().c_str());
   } else {
@@ -1200,10 +1261,17 @@ void tentarReconectarWS() {
   // nao reconectar agressivamente; nunca durante gravacao
   if (gravando) return;
   if (millis() - wsLastTry < WS_RETRY_MS) return;
+
   if (WiFi.status() != WL_CONNECTED) {
     discoReset();              // o socket UDP morre junto com a interface
     WiFi.reconnect();
+    wsLastTry = millis();
+    // Sem rede, descoberta e WebSocket sao puro desperdicio: gastavam segundos
+    // bloqueados a cada ciclo, e era justamente nesse tempo que o toque em W
+    // se perdia, deixando a configuracao inalcancavel quando mais precisava.
+    return;
   }
+
   // v2.1: tenta redescobrir se ainda nao temos URL resolvida
   if (resolvedWsUrl.length() == 0) descobrirServidor();
   conectarWebSocket();
