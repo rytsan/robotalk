@@ -62,8 +62,15 @@ using namespace websockets;
 #define MIC_RING_BYTES    (MIC_RING_SAMPLES * sizeof(int16_t))
 
 // --- Playback: le do SD em pedacos pequenos (sem buffer gigante em RAM) ---
-#define PLAY_CHUNK_SAMPLES 2048
+// O chunk e um multiplo EXATO da janela de visema. Se nao for, sobra um resto
+// de amostras sem visema e a boca acumula adiantamento ao longo da fala.
+#define VIS_WINDOW         320                            // 20 ms @ 16 kHz
+#define VIS_PER_CHUNK      6                              // visemas por chunk
+#define PLAY_CHUNK_SAMPLES (VIS_WINDOW * VIS_PER_CHUNK)   // 1920 = 120 ms
 #define PLAY_CHUNK_BYTES   (PLAY_CHUNK_SAMPLES * sizeof(int16_t))
+#define VIS_FIFO_LEN       16                             // 2 chunks + folga
+#define VIS_FRAME_MS       20                             // ritmo de saida da FIFO
+#define VIS_ZCR_PCT        15                             // % de cruzamentos = sibilante
 
 // --- SD (pinos do Cardputer) ---
 #define SD_SCK   40
@@ -129,6 +136,18 @@ enum RobotMood {
   MOOD_CONCERNED
 };
 
+// Visemas: formato da boca derivado do audio que esta tocando.
+// Duas dimensoes baratas de extrair: energia (RMS) -> abertura,
+// zero-crossing rate -> forma (larga e fina vs. redonda e alta).
+enum Viseme {
+  VIS_CLOSED,   // silencio / pausa entre palavras
+  VIS_MMM,      // energia baixa, grave: m / b / p
+  VIS_SS,       // energia baixa, agudo: s / f / ch
+  VIS_EE,       // energia media, agudo: e / i
+  VIS_OH,       // energia media, grave: o / u
+  VIS_AH        // energia alta, grave: a aberto
+};
+
 /* ========================= VARIAVEIS GLOBAIS ======================== */
 WebsocketsClient client;
 WiFiUDP disco;                       // v2.1: socket UDP de descoberta
@@ -148,8 +167,15 @@ unsigned long lastAnimMs   = 0;
 int   animFrame   = 0;               // contador generico de animacao
 int   gazeDir     = 1;               // 0=esq 1=centro 2=dir (THINKING)
 int   thinkDots   = 0;               // 0..3 pontinhos
-bool  mouthOpen   = false;           // SPEAKING
-int   speechMouthLevel = 0;          // altura da boca baseada no volume do audio
+// --- animacao de fala por visema ---
+Viseme   currentViseme = VIS_CLOSED;
+uint8_t  mouthH = 4;                 // altura suavizada da boca (px)
+uint8_t  mouthW = 30;                // largura suavizada da boca (px)
+uint32_t peakEnv = 3000;             // pico movel: normaliza o RMS ao nivel do Piper
+Viseme   visFifo[VIS_FIFO_LEN];
+uint8_t  visHead = 0;
+uint8_t  visTail = 0;
+unsigned long lastVisMs = 0;
 bool  blinking    = false;           // IDLE: piscar
 unsigned long blinkUntilMs = 0;
 unsigned long nextBlinkMs  = 0;
@@ -210,7 +236,14 @@ void drawMsgLine();
 void setRobotState(RobotState s);
 void setRobotMood(RobotMood mood);
 void animateRobotFace();
-int audioMouthLevel(const int16_t* samples, int sampleCount);
+
+Viseme visemeFromWindow(const int16_t* samples, int sampleCount);
+void   visemeShape(Viseme v, uint8_t* h, uint8_t* w);
+void   pushVisemesFromChunk(const int16_t* buf, int sampleCount);
+void   visPush(Viseme v);
+bool   visPop(Viseme* out);
+void   tickMouth();
+void   resetMouthAnim();
 
 uint16_t stateColor(RobotState s);
 const char* stateLabel(RobotState s);
@@ -549,7 +582,9 @@ void tratarTexto(const String& txt) {
       rxFile = SD.open("/rx_audio.raw", FILE_WRITE);
     }
     recebendoAudio = true;
-    setRobotState(STATE_SPEAKING);
+    // Ainda estamos so RECEBENDO bytes; falar comeca em tocarArquivoRaw().
+    // Marcar SPEAKING aqui fazia o robo gesticular durante o download.
+    setRobotState(STATE_THINKING);
   }
   else if (txt == "PLAY_END") {
     recebendoAudio = false;
@@ -558,29 +593,106 @@ void tratarTexto(const String& txt) {
   }
 }
 
-int audioMouthLevel(const int16_t* samples, int sampleCount) {
-  if (!samples || sampleCount <= 0) return 0;
+/* ===================== MOTOR DE VISEMAS (lip sync) ==================== *
+ * Uma passada por janela de 20 ms extrai os dois sinais usados:
+ *   - energia RMS       -> quanto a boca abre
+ *   - zero-crossing rate-> forma (sibilante = larga e fina; grave = redonda)
+ * O RMS e normalizado por um pico movel, entao o resultado nao depende do
+ * nivel absoluto do Piper (que muda se o servidor aplicar filtro de volume).
+ */
+Viseme visemeFromWindow(const int16_t* samples, int sampleCount) {
+  if (!samples || sampleCount <= 0) return VIS_CLOSED;
 
-  uint32_t sum = 0;
-  uint16_t counted = 0;
+  uint64_t energy = 0;
+  uint16_t crossings = 0;
 
-  // Amostragem leve: uma a cada 4 amostras. Playback nao e caminho critico do mic.
-  for (int i = 0; i < sampleCount; i += 4) {
-    int32_t sample = samples[i];
-    if (sample < 0) sample = -sample;
-    sum += (uint32_t)sample;
-    counted++;
+  for (int i = 0; i < sampleCount; i++) {
+    int32_t s = samples[i];
+    energy += (uint64_t)(s * s);
+    if (i > 0 && ((samples[i] < 0) != (samples[i - 1] < 0))) crossings++;
   }
 
-  if (counted == 0) return 0;
+  uint32_t rms = (uint32_t)sqrtf((float)(energy / (uint32_t)sampleCount));
 
-  uint32_t avg = sum / counted;
-  if (avg < 180) return 3;
-  if (avg < 700) return 6;
-  if (avg < 1600) return 10;
-  if (avg < 3200) return 14;
-  if (avg < 6000) return 18;
-  return 22;
+  // pico movel: sobe na hora, decai devagar (~1/128 por janela)
+  if (rms > peakEnv) peakEnv = rms;
+  else               peakEnv -= (peakEnv >> 7);
+  if (peakEnv < 800) peakEnv = 800;            // piso: evita amplificar ruido
+
+  uint32_t lvl = (rms * 100) / peakEnv;                       // 0..100
+  bool sibilante = ((uint32_t)crossings * 100 / (uint32_t)sampleCount) > VIS_ZCR_PCT;
+
+  if (lvl < 8)  return VIS_CLOSED;
+  if (lvl < 20) return sibilante ? VIS_SS : VIS_MMM;
+  if (lvl < 55) return sibilante ? VIS_EE : VIS_OH;
+  return sibilante ? VIS_EE : VIS_AH;
+}
+
+void visemeShape(Viseme v, uint8_t* h, uint8_t* w) {
+  switch (v) {
+    case VIS_CLOSED: *h = 4;  *w = 30; break;
+    case VIS_MMM:    *h = 6;  *w = 26; break;
+    case VIS_SS:     *h = 7;  *w = 38; break;
+    case VIS_EE:     *h = 12; *w = 40; break;
+    case VIS_OH:     *h = 18; *w = 22; break;
+    case VIS_AH:     *h = 24; *w = 32; break;
+    default:         *h = 4;  *w = 30; break;
+  }
+}
+
+void visPush(Viseme v) {
+  uint8_t next = (uint8_t)((visHead + 1) % VIS_FIFO_LEN);
+  if (next == visTail) return;                 // cheia: descarta o mais novo
+  visFifo[visHead] = v;
+  visHead = next;
+}
+
+bool visPop(Viseme* out) {
+  if (visTail == visHead) return false;
+  *out = visFifo[visTail];
+  visTail = (uint8_t)((visTail + 1) % VIS_FIFO_LEN);
+  return true;
+}
+
+// Calcula todos os visemas de um chunk de uma vez, no momento da leitura do SD.
+void pushVisemesFromChunk(const int16_t* buf, int sampleCount) {
+  int windows = sampleCount / VIS_WINDOW;
+  for (int w = 0; w < windows; w++) {
+    visPush(visemeFromWindow(&buf[w * VIS_WINDOW], VIS_WINDOW));
+  }
+}
+
+// Consome a FIFO no ritmo do audio e redesenha so quando a forma muda.
+void tickMouth() {
+  unsigned long now = millis();
+  if (now - lastVisMs < VIS_FRAME_MS) return;
+  lastVisMs = now;
+
+  Viseme v;
+  if (visPop(&v)) currentViseme = v;
+  else            currentViseme = VIS_CLOSED;  // sem dado: fecha a boca
+
+  uint8_t th, tw;
+  visemeShape(currentViseme, &th, &tw);
+
+  uint8_t prevH = mouthH;
+  uint8_t prevW = mouthW;
+
+  // attack imediato, release suave (~3 frames): sem isso a boca treme
+  mouthH = (th > mouthH) ? th : (uint8_t)(mouthH - ((mouthH - th) >> 1));
+  mouthW = (tw > mouthW) ? tw : (uint8_t)(mouthW - ((mouthW - tw) >> 1));
+
+  if (mouthH != prevH || mouthW != prevW) drawMouth();
+}
+
+void resetMouthAnim() {
+  visHead = 0;
+  visTail = 0;
+  currentViseme = VIS_CLOSED;
+  mouthH = 4;
+  mouthW = 30;
+  peakEnv = 3000;
+  lastVisMs = millis();
 }
 
 /* ===================== MIC / SPEAKER (half-duplex) ================== */
@@ -680,6 +792,7 @@ void tocarArquivoRaw(const char* path) {
 
   enableSpeaker();
   setRobotState(STATE_SPEAKING);
+  resetMouthAnim();
 
   while (f.available()) {
     int bytesLidos = f.read((uint8_t*)playBuffer, PLAY_CHUNK_BYTES);
@@ -695,9 +808,9 @@ void tocarArquivoRaw(const char* path) {
     int samples = bytesLidos / 2;
 
     if (samples > 0) {
-      speechMouthLevel = audioMouthLevel(playBuffer, samples);
-      mouthOpen = true;
-      drawMouth();
+      // Visemas do chunk inteiro sao calculados aqui, de uma vez;
+      // tickMouth() os consome a 20 ms enquanto o audio toca.
+      pushVisemesFromChunk(playBuffer, samples);
 
       M5Cardputer.Speaker.playRaw(
         playBuffer,
@@ -708,17 +821,9 @@ void tocarArquivoRaw(const char* path) {
         0
       );
 
-      unsigned long lastMouth = millis();
-
       while (M5Cardputer.Speaker.isPlaying()) {
         M5Cardputer.update();
-
-        if (millis() - lastMouth > 70) {
-          lastMouth = millis();
-          mouthOpen = !mouthOpen;
-          drawMouth();
-        }
-
+        tickMouth();
         delay(1);
       }
     }
@@ -727,7 +832,8 @@ void tocarArquivoRaw(const char* path) {
   f.close();
 
   M5Cardputer.Speaker.end();
-  speechMouthLevel = 0;
+  resetMouthAnim();
+  drawMouth();
 
   setRobotState(STATE_IDLE);
   strcpy(msgLine, "Playback fim");
@@ -946,10 +1052,11 @@ void drawMouth() {
       d.fillRoundRect(MOUTH_CX - 10, MOUTH_CY - 2, 20, 5, 2, col);
       break;
 
-    case STATE_SPEAKING: {                      // boca animada por volume do audio
-      int h = speechMouthLevel > 0 ? speechMouthLevel : (mouthOpen ? 20 : 6);
-      if (!mouthOpen && speechMouthLevel > 0) h = max(4, h - 4);
-      d.fillRoundRect(MOUTH_CX - 17, MOUTH_CY - h / 2, 34, h, 5, col);
+    case STATE_SPEAKING: {                      // forma vinda do visema atual
+      int h = (mouthH < 3) ? 3 : mouthH;
+      int w = (mouthW < 8) ? 8 : mouthW;
+      int r = (h < 6) ? (h / 2) : 5;            // raio > h/2 renderiza torto
+      d.fillRoundRect(MOUTH_CX - w / 2, MOUTH_CY - h / 2, w, h, r, col);
       break;
     }
 
@@ -998,7 +1105,6 @@ void setRobotState(RobotState s) {
   animFrame = 0;
   gazeDir   = 1;
   thinkDots = 0;
-  mouthOpen = false;
   blinking  = false;
   lastAnimMs = millis();
 
@@ -1055,9 +1161,8 @@ void animateRobotFace() {
       break;
 
     case STATE_SPEAKING:
-      // a boca e animada dentro de tocarArquivoRaw(); aqui fica leve
-      mouthOpen = !mouthOpen;
-      drawMouth();
+      // a boca e dirigida por tickMouth() dentro de tocarArquivoRaw().
+      // Nada a fazer aqui: um toggle cego brigaria com o visema.
       break;
 
     case STATE_ERROR:
