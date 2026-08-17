@@ -199,6 +199,23 @@ ROBO_PULL_MODEL=0        # não baixa modelo
 
 Atenção ao nome exato: `qwen2.5:1.5b` e `qwen2.5:1.5b-instruct` são modelos diferentes. Pedir um que não existe devolve HTTP 404 e o servidor cai no fallback.
 
+### Comparação medida
+
+Testados com o system prompt real do robô, nesta ordem de preferência:
+
+| modelo | tamanho | português | extração JSON | velocidade |
+|---|---|---|---|---|
+| `cnmoro/gemma3-gaia-ptbr-4b:q4_k_m` | 2,5 GB | natural e conciso | 5/5 | mais rápido |
+| `qwen2.5:7b-instruct` | 4,7 GB | correto, prolixo | 4/5 | médio |
+| `qwen2.5:1.5b` | 986 MB | erros de concordância | 5/5 | médio |
+| `qwen3.5:2b` | 2,7 GB | — | — | inutilizável |
+
+O `qwen3.5` é modelo de raciocínio e devolve conteúdo vazio pela API de chat; não serve aqui sem tratamento à parte.
+
+O gemma afinado para pt-BR responde de forma mais natural e mais curta, que é o que este robô pede, e ainda foi o mais rápido. Ele responde com emoji: o servidor remove antes de mandar para a tela e para o Piper, porque o Cardputer usa fonte ASCII e o Piper não fala emoji.
+
+Nenhum modelo sabe que horas são, e todos inventam um horário quando perguntados. Isso é limitação do system prompt, não do modelo.
+
 Se o Ollama falhar, o servidor usa um fallback local simples para manter o fluxo funcionando. Para saber qual dos dois está em uso, digite `llm` no console ou olhe a linha `Resposta via ...` de cada resposta.
 
 ## Memória persistente

@@ -511,6 +511,27 @@ def transcribe_audio(wav_path: Path) -> str:
     return final_text
 
 
+# O Cardputer desenha com fonte ASCII e o Piper não fala emoji. Modelos como o
+# gemma3 respondem com carinhas, que virariam glifos quebrados na tela e ruído
+# ou silêncio na síntese. A memória guarda o texto original; só o que vai para a
+# tela e para a fala é limpo.
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"       # emoticons, pictogramas, símbolos suplementares
+    "\U00002600-\U000027BF"       # símbolos diversos e dingbats
+    "\U00002190-\U000021FF"       # setas
+    "\U0000FE00-\U0000FE0F"       # seletores de variação
+    "\U0000200D"                  # zero-width joiner
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def sanitize_reply(text: str) -> str:
+    limpo = EMOJI_PATTERN.sub("", text)
+    return re.sub(r"\s+", " ", limpo).strip()
+
+
 def basic_reply(text: str) -> str:
     cleaned = text.strip()
     if not cleaned:
@@ -889,6 +910,12 @@ def make_tts_raw(reply_text: str) -> Path:
     if not VOICE_MODEL.exists() or not VOICE_MODEL_JSON.exists():
         raise FileNotFoundError("Arquivos de voz do Piper não encontrados em server/voices/.")
 
+    # Rede de segurança: o caminho do console (`say`) e o do comando SAY chegam
+    # aqui sem passar pelo saneamento da resposta.
+    reply_text = sanitize_reply(reply_text)
+    if not reply_text:
+        raise ValueError("Texto vazio depois de remover símbolos não falados.")
+
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     text_path = TTS_OUT_DIR / f"reply_{timestamp}.txt"
     wav_path = TTS_OUT_DIR / f"reply_{timestamp}.wav"
@@ -980,12 +1007,14 @@ async def handle_saved_recording(websocket: Any, raw_data: bytes, sample_rate: i
     await send_text(websocket, f"MSG Transcricao: {transcription}")
 
     reply = generate_reply(transcription)
+    reply_limpo = sanitize_reply(reply)
+
     await send_text(websocket, f"EMO {classify_mood(transcription)}")
-    await send_text(websocket, f"MSG Resposta: {reply}")
+    await send_text(websocket, f"MSG Resposta: {reply_limpo}")
 
     if AUTO_TTS_REPLY:
         try:
-            tts_raw = await asyncio.to_thread(make_tts_raw, reply)
+            tts_raw = await asyncio.to_thread(make_tts_raw, reply_limpo)
             await stream_raw_audio(websocket, tts_raw)
         except Exception as error:
             print(f"Erro gerando TTS: {error}")
