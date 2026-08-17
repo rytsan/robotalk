@@ -9,6 +9,18 @@ cd /home/ricardo/robo/robo/server
 bash run_server.sh
 ```
 
+O script sobe o Ollama antes do servidor, se ele ainda não estiver no ar. Na primeira vez, rode `bash install_server.sh`, que instala o Ollama e baixa o modelo além de preparar o venv.
+
+Confira as três linhas do boot antes de seguir:
+
+```text
+LLM OK: ... modelo 'qwen2.5:1.5b-instruct' pronto
+Beacon UDP transmitindo para: ...
+Servidor em ws://0.0.0.0:8765
+```
+
+Se a primeira disser `LLM INDISPONÍVEL`, as respostas virão do fallback local até isso ser resolvido.
+
 2. No Cardputer, gravar o firmware. Não é preciso editar SSID, senha nem IP: o único valor a conferir antes de gravar é o `ROBOT_SECRET`, que precisa bater com o `ROBO_DISCOVERY_TOKEN` do servidor.
 3. Ligar o Cardputer com SD inserido e chave física em `ON`.
 4. No primeiro boot a tela de configuração abre sozinha. Escolher a rede e digitar a senha. Depois disso a credencial fica salva na NVS e o passo não se repete; a tecla `W` reabre a tela quando precisar trocar de rede.

@@ -20,6 +20,7 @@ O ciclo principal já está implementado de ponta a ponta:
 - `server/robo_server.py`: servidor Python persistente no Raspberry.
 - `server/memory_store.py`: memória persistente híbrida em SQLite.
 - `server/sentiment.py`: análise de sentimento da fala do usuário.
+- `server/lib_ollama.sh`: funções de instalação e verificação do LLM, usadas pelos dois scripts.
 - `../tts/cardputer_assistente/cardputer_assistente.ino`: firmware do Cardputer.
 - `server/voices/`: voz Piper usada para TTS.
 - `server/mic_tests/`: capturas de microfone salvas pelo servidor.
@@ -184,13 +185,23 @@ export ROBO_OLLAMA_MODEL="qwen2.5:1.5b-instruct"
 export ROBO_OLLAMA_TIMEOUT_S="30"
 ```
 
-Instalação mínima do modelo:
+O `install_server.sh` cuida disso sozinho: instala o Ollama se não houver, sobe o serviço e baixa o modelo. O `run_server.sh` garante que ele esteja no ar antes de iniciar o servidor.
+
+Para pular a etapa do LLM na instalação:
 
 ```bash
-ollama pull qwen2.5:1.5b-instruct
+ROBO_INSTALL_OLLAMA=0 bash install_server.sh
 ```
 
-Se o Ollama falhar, o servidor usa um fallback local simples para manter o fluxo funcionando.
+Para usar um modelo que já esteja instalado, em vez de baixar outro:
+
+```bash
+ROBO_OLLAMA_MODEL="qwen2.5:1.5b" bash run_server.sh
+```
+
+Atenção ao nome exato: `qwen2.5:1.5b` e `qwen2.5:1.5b-instruct` são modelos diferentes. Pedir um que não existe devolve HTTP 404 e o servidor cai no fallback.
+
+Se o Ollama falhar, o servidor usa um fallback local simples para manter o fluxo funcionando. Para saber qual dos dois está em uso, digite `llm` no console ou olhe a linha `Resposta via ...` de cada resposta.
 
 ## Memória persistente
 
