@@ -889,18 +889,12 @@ void tratarTecla(char k) {
 }
 
 /* =========================== UI ===================================== */
+// CANAIS SEPARADOS:
+//   forma dos olhos/boca -> emocao do USUARIO  (currentMood, via EMO)
+//   cor do rosto         -> estado do ROBO     (currentState)
+// Antes o humor sequestrava a cor e o estado era so fallback, entao nao dava
+// para ler "o robo esta pensando" e "o usuario esta triste" ao mesmo tempo.
 uint16_t stateColor(RobotState s) {
-  if (s != STATE_ERROR) {
-    switch (currentMood) {
-      case MOOD_HAPPY:     return TFT_GREEN;
-      case MOOD_SAD:       return TFT_BLUE;
-      case MOOD_CONFUSED:  return TFT_MAGENTA;
-      case MOOD_EXCITED:   return TFT_ORANGE;
-      case MOOD_CONCERNED: return TFT_YELLOW;
-      case MOOD_NEUTRAL:   break;
-    }
-  }
-
   switch (s) {
     case STATE_IDLE:      return TFT_GREEN;
     case STATE_LISTENING: return TFT_CYAN;
