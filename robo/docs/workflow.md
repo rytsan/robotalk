@@ -9,15 +9,18 @@ cd /home/ricardo/robo/robo/server
 bash run_server.sh
 ```
 
-O script sobe o Ollama antes do servidor, se ele ainda não estiver no ar. Na primeira vez, rode `bash install_server.sh`, que instala o Ollama e baixa o modelo além de preparar o venv.
+Esse é o único comando necessário. Na primeira vez ele prepara tudo: pacotes de sistema, venv, dependências, Ollama e modelo. Depois, cada etapa se reconhece pronta e é pulada, então o arranque é imediato.
 
-Confira as três linhas do boot antes de seguir:
+Confira as linhas do boot antes de seguir:
 
 ```text
+LLM pronto: 'qwen2.5:1.5b-instruct' em http://127.0.0.1:11434
 LLM OK: ... modelo 'qwen2.5:1.5b-instruct' pronto
 Beacon UDP transmitindo para: ...
 Servidor em ws://0.0.0.0:8765
 ```
+
+A primeira linha vem do script; a segunda, do próprio servidor conferindo por conta.
 
 Se a primeira disser `LLM INDISPONÍVEL`, as respostas virão do fallback local até isso ser resolvido.
 

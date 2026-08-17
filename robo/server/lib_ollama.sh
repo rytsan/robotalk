@@ -2,8 +2,11 @@
 # Funções compartilhadas para lidar com o Ollama.
 # Carregado com `source` por install_server.sh e run_server.sh.
 #
-# Nada aqui é fatal: o servidor tem fallback local e continua funcionando sem
-# LLM. O objetivo é falhar em voz alta, não derrubar o robô.
+# Tudo aqui é idempotente: cada etapa é pulada quando já está satisfeita, então
+# chamar de novo não reinstala nem rebaixa nada.
+#
+# Nada aqui é fatal. O servidor tem fallback local e continua funcionando sem
+# LLM: o objetivo é falhar em voz alta, não derrubar o robô.
 
 # http://127.0.0.1:11434/api/chat -> http://127.0.0.1:11434
 ollama_api_root() {
@@ -19,18 +22,41 @@ ollama_responde() {
   curl -fsS --max-time 2 "$(ollama_api_root)/api/tags" >/dev/null 2>&1
 }
 
-# Sobe o Ollama se não estiver respondendo. Devolve 1 se não conseguir.
-ollama_garantir_no_ar() {
-  if ollama_responde; then
+# O modelo pedido está instalado? Compara o nome EXATO (grep -qx): comparação
+# por substring daria falso positivo entre `qwen2.5:1.5b` e
+# `qwen2.5:1.5b-instruct`, que são modelos diferentes. Pedir um que não existe
+# devolve HTTP 404 e o servidor cai no fallback em silêncio.
+ollama_tem_modelo() {
+  local alvo
+  alvo="$(ollama_modelo)"
+  ollama list 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -qx -- "$alvo"
+}
+
+# --- etapas, todas puláveis quando já resolvidas ---
+
+ollama_instalar_se_faltar() {
+  if command -v ollama >/dev/null 2>&1; then
     return 0
   fi
-
-  if ! command -v ollama >/dev/null 2>&1; then
-    echo "Ollama não está instalado. Rode: bash install_server.sh"
+  if [[ "${ROBO_INSTALL_OLLAMA:-1}" != "1" ]]; then
+    echo "LLM: Ollama ausente e instalação desativada (ROBO_INSTALL_OLLAMA=0)."
     return 1
   fi
 
-  echo "Ollama não está respondendo. Tentando subir..."
+  echo "LLM: Ollama não encontrado. Instalando (só desta vez)..."
+  curl -fsSL https://ollama.com/install.sh | sh
+  command -v ollama >/dev/null 2>&1
+}
+
+ollama_subir_se_parado() {
+  if ollama_responde; then
+    return 0
+  fi
+  if ! command -v ollama >/dev/null 2>&1; then
+    return 1
+  fi
+
+  echo "LLM: subindo o Ollama..."
 
   if command -v systemctl >/dev/null 2>&1; then
     sudo systemctl start ollama >/dev/null 2>&1 \
@@ -45,21 +71,39 @@ ollama_garantir_no_ar() {
   local tentativa
   for tentativa in $(seq 1 20); do          # até ~10 s
     if ollama_responde; then
-      echo "Ollama no ar em $(ollama_api_root)."
       return 0
     fi
     sleep 0.5
   done
 
-  echo "Ollama não subiu em 10 s. Log em /tmp/ollama_robo.log"
+  echo "LLM: Ollama não subiu em 10 s. Log em /tmp/ollama_robo.log"
   return 1
 }
 
-# O modelo pedido está instalado? Compara o nome exato: `qwen2.5:1.5b` e
-# `qwen2.5:1.5b-instruct` são modelos diferentes, e pedir o que não existe
-# devolve HTTP 404 que o servidor trata como fallback.
-ollama_tem_modelo() {
-  local alvo
-  alvo="$(ollama_modelo)"
-  ollama list 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -qx -- "$alvo"
+ollama_baixar_modelo_se_faltar() {
+  local modelo
+  modelo="$(ollama_modelo)"
+
+  if ollama_tem_modelo; then
+    return 0
+  fi
+  if [[ "${ROBO_PULL_MODEL:-1}" != "1" ]]; then
+    echo "LLM: modelo '$modelo' ausente e download desativado (ROBO_PULL_MODEL=0)."
+    return 1
+  fi
+
+  echo "LLM: baixando o modelo '$modelo'. Isso acontece uma vez só e demora."
+  ollama pull "$modelo" || return 1
+  ollama_tem_modelo
+}
+
+# Deixa o LLM pronto: instala, sobe e baixa o modelo, pulando o que já existe.
+# Numa máquina já preparada isto custa um curl de milissegundos.
+ollama_preparar() {
+  ollama_instalar_se_faltar     || return 1
+  ollama_subir_se_parado        || return 1
+  ollama_baixar_modelo_se_faltar || return 1
+
+  echo "LLM pronto: '$(ollama_modelo)' em $(ollama_api_root)"
+  return 0
 }

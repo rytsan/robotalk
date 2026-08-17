@@ -5,9 +5,12 @@ BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$BASE_DIR/.venv"
 DEFAULT_DISCOVERY_TOKEN="TROQUE_ESTE_SEGREDO_COMPARTILHADO"
 
+# Este é o único comando necessário. Na primeira vez ele prepara tudo; nas
+# seguintes, cada etapa se reconhece pronta e é pulada em milissegundos.
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
-  echo "Ambiente virtual não encontrado. Execute primeiro: bash install_server.sh"
-  exit 1
+  echo "Ambiente virtual não encontrado. Preparando (só desta vez)..."
+  bash "$BASE_DIR/install_server.sh"
+  echo
 fi
 
 source "$VENV_DIR/bin/activate"
@@ -15,14 +18,10 @@ source "$VENV_DIR/bin/activate"
 # shellcheck source=lib_ollama.sh
 source "$BASE_DIR/lib_ollama.sh"
 
-# Sobe o Ollama antes do servidor, se ainda nao estiver no ar. Falhar aqui nao
-# impede o robo de rodar: ele responde com o fallback local, so mais burro.
-if ! ollama_garantir_no_ar; then
+# Instala, sobe e baixa o modelo conforme necessário. Falhar aqui não impede o
+# robô de rodar: ele responde com o fallback local, só mais burro.
+if ! ollama_preparar; then
   echo "Aviso: seguindo sem LLM. As respostas usarão o fallback local."
-elif ! ollama_tem_modelo; then
-  echo "Aviso: o modelo '$(ollama_modelo)' não está instalado."
-  echo "       Rode: ollama pull $(ollama_modelo)"
-  echo "       Ou aponte para outro: ROBO_OLLAMA_MODEL=<nome> bash run_server.sh"
 fi
 
 # Precisa casar com ROBOT_SECRET no firmware para o RDISCOVER ser aceito.

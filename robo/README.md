@@ -30,19 +30,16 @@ O ciclo principal já está implementado de ponta a ponta:
 
 ## Servidor
 
-Instale o ambiente no Raspberry:
-
-```bash
-cd /home/ricardo/robo/robo/server
-bash install_server.sh
-```
-
-Rode o servidor:
+Um comando só, no Raspberry:
 
 ```bash
 cd /home/ricardo/robo/robo/server
 bash run_server.sh
 ```
+
+Na primeira vez ele prepara tudo sozinho: pacotes de sistema, venv, dependências Python, Ollama e o modelo. Nas vezes seguintes cada etapa se reconhece pronta e é pulada, então o arranque é imediato — nada é reinstalado nem rebaixado.
+
+O `install_server.sh` continua existindo e pode ser chamado direto, mas só é necessário se você quiser rodar a preparação sem subir o servidor.
 
 O servidor escuta em:
 
@@ -185,18 +182,19 @@ export ROBO_OLLAMA_MODEL="qwen2.5:1.5b-instruct"
 export ROBO_OLLAMA_TIMEOUT_S="30"
 ```
 
-O `install_server.sh` cuida disso sozinho: instala o Ollama se não houver, sobe o serviço e baixa o modelo. O `run_server.sh` garante que ele esteja no ar antes de iniciar o servidor.
-
-Para pular a etapa do LLM na instalação:
-
-```bash
-ROBO_INSTALL_OLLAMA=0 bash install_server.sh
-```
+O `run_server.sh` cuida disso sozinho, a cada arranque: instala o Ollama se não houver, sobe o serviço se estiver parado e baixa o modelo se faltar. Tudo idempotente — numa máquina já preparada custa alguns milissegundos.
 
 Para usar um modelo que já esteja instalado, em vez de baixar outro:
 
 ```bash
 ROBO_OLLAMA_MODEL="qwen2.5:1.5b" bash run_server.sh
+```
+
+Para desativar cada etapa automática:
+
+```bash
+ROBO_INSTALL_OLLAMA=0    # não instala o Ollama
+ROBO_PULL_MODEL=0        # não baixa modelo
 ```
 
 Atenção ao nome exato: `qwen2.5:1.5b` e `qwen2.5:1.5b-instruct` são modelos diferentes. Pedir um que não existe devolve HTTP 404 e o servidor cai no fallback.
