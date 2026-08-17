@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 from urllib import error, request
 
+import sentiment
 import websockets
 from faster_whisper import WhisperModel
 from memory_store import (
@@ -389,21 +390,21 @@ def basic_reply(text: str) -> str:
     return f"Eu ouvi: {cleaned}"
 
 
-def classify_mood(user_text: str, reply_text: str) -> str:
-    text = f"{user_text} {reply_text}".lower()
+def classify_mood(user_text: str) -> str:
+    """Canal de empatia: o rosto reflete a emoção de QUEM FALOU.
 
-    if any(word in text for word in ["erro", "falha", "problema", "não consegui", "nao consegui"]):
-        return "CONCERNED"
-    if any(word in text for word in ["triste", "chateado", "ruim", "medo"]):
-        return "SAD"
-    if "?" in user_text or any(word in text for word in ["talvez", "não entendi", "nao entendi", "dúvida", "duvida"]):
-        return "CONFUSED"
-    if any(word in text for word in ["ótimo", "otimo", "excelente", "legal", "boa", "consegui", "sucesso"]):
-        return "HAPPY"
-    if any(word in text for word in ["vamos", "bora", "animado", "incrível", "incrivel"]):
-        return "EXCITED"
-
-    return "NEUTRAL"
+    O estado do próprio robô (pensando, falando, erro) é outro canal e vive
+    no firmware, na cor do rosto. Recebe só a fala do usuário de propósito:
+    misturar a resposta do robô fazia o "erro" dito pelo usuário deixar o
+    rosto preocupado mesmo com uma resposta tranquila.
+    """
+    result = sentiment.analyze(user_text)
+    print(
+        f"Sentimento: {result.mood} "
+        f"(val={result.valence:+.2f} aro={result.arousal:.2f} "
+        f"conf={result.confidence:.2f} hits={result.hits})"
+    )
+    return result.mood
 
 
 def remember_turn(role: str, content: str) -> None:
@@ -595,7 +596,7 @@ async def handle_saved_recording(websocket: Any, raw_data: bytes, sample_rate: i
     await send_text(websocket, f"MSG Transcricao: {transcription}")
 
     reply = generate_reply(transcription)
-    await send_text(websocket, f"EMO {classify_mood(transcription, reply)}")
+    await send_text(websocket, f"EMO {classify_mood(transcription)}")
     await send_text(websocket, f"MSG Resposta: {reply}")
 
     if AUTO_TTS_REPLY:
@@ -761,6 +762,7 @@ async def main() -> None:
     global send_lock
 
     ensure_directories()
+    sentiment.init_from_env()
     memory_store = MemoryStore(MEMORY_DB)
     print(f"Memória persistente em: {MEMORY_DB}")
 
