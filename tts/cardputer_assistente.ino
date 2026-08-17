@@ -231,6 +231,7 @@ void tratarTecla(char k);
 
 void drawFaceBase();
 void drawBattery(bool force);
+void drawMoodEye(int cx, int eyeIndex, uint16_t col, bool allowBlink);
 void drawEyes();
 void drawMouth();
 void drawStatusText();
@@ -966,6 +967,38 @@ void drawBattery(bool force) {
   else { d.print(lvl); d.print("%"); }
 }
 
+// Forma do olho ditada pelo humor. Usada em IDLE e em SPEAKING.
+// eyeIndex: 0 = esquerdo, 1 = direito (MOOD_CONFUSED desalinha os dois).
+void drawMoodEye(int cx, int eyeIndex, uint16_t col, bool allowBlink) {
+  auto& d = M5Cardputer.Display;
+
+  switch (currentMood) {
+    case MOOD_HAPPY:
+      d.fillRoundRect(cx - 15, EYE_CY - 11, 30, 22, 10, col);
+      return;
+    case MOOD_SAD:
+      d.fillRoundRect(cx - 13, EYE_CY + 1, 26, 9, 4, col);
+      return;
+    case MOOD_CONFUSED: {
+      int off = (eyeIndex == 0) ? -5 : 5;
+      d.fillRoundRect(cx - 10 + off, EYE_CY - 10, 20, 22, 6, col);
+      return;
+    }
+    case MOOD_EXCITED:
+      d.fillRoundRect(cx - 17, EYE_CY - 18, 34, 36, 9, col);
+      return;
+    case MOOD_CONCERNED:
+      // sobrancelha caida: olho menor, deslocado para baixo
+      d.fillRoundRect(cx - 12, EYE_CY - 6, 24, 20, 6, col);
+      return;
+    case MOOD_NEUTRAL:
+      break;
+  }
+
+  if (allowBlink && blinking) d.fillRoundRect(cx - 13, EYE_CY - 3, 26, 6, 3, col);
+  else                        d.fillRoundRect(cx - 13, EYE_CY - 15, 26, 30, 8, col);
+}
+
 // desenha os dois olhos conforme o estado / animacao (dirty-rect)
 void drawEyes() {
   auto& d = M5Cardputer.Display;
@@ -980,20 +1013,7 @@ void drawEyes() {
 
     switch (currentState) {
       case STATE_IDLE:
-        if (currentMood == MOOD_HAPPY)
-          d.fillRoundRect(cx - 15, EYE_CY - 11, 30, 22, 10, col);
-        else if (currentMood == MOOD_SAD)
-          d.fillRoundRect(cx - 13, EYE_CY + 1, 26, 9, 4, col);
-        else if (currentMood == MOOD_CONFUSED) {
-          int off = (i == 0) ? -5 : 5;
-          d.fillRoundRect(cx - 10 + off, EYE_CY - 10, 20, 22, 6, col);
-        }
-        else if (currentMood == MOOD_EXCITED)
-          d.fillRoundRect(cx - 17, EYE_CY - 18, 34, 36, 9, col);
-        else if (blinking)
-          d.fillRoundRect(cx - 13, EYE_CY - 3, 26, 6, 3, col);
-        else
-          d.fillRoundRect(cx - 13, EYE_CY - 15, 26, 30, 8, col);
+        drawMoodEye(cx, i, col, true);
         break;
 
       case STATE_LISTENING: {
@@ -1014,7 +1034,9 @@ void drawEyes() {
       }
 
       case STATE_SPEAKING:
-        d.fillRoundRect(cx - 13, EYE_CY - 15, 26, 30, 8, col);
+        // mesma forma de humor do IDLE, mas sem piscar: e enquanto o robo
+        // fala que a emocao da resposta precisa estar visivel
+        drawMoodEye(cx, i, col, false);
         break;
 
       case STATE_ERROR:                         // olhos em X
