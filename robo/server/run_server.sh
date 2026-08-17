@@ -17,4 +17,10 @@ source "$VENV_DIR/bin/activate"
 #   ROBO_DISCOVERY_TOKEN="meu_segredo" bash run_server.sh
 export ROBO_DISCOVERY_TOKEN="${ROBO_DISCOVERY_TOKEN:-$DEFAULT_DISCOVERY_TOKEN}"
 
+# Beacon UDP ligado por padrão: o servidor se anuncia em broadcast a cada
+# intervalo, então o Cardputer o encontra mesmo tendo ligado antes dele.
+# O RDISCOVER continua ativo em paralelo; um não substitui o outro.
+# Desligue com ROBO_DISCOVERY_BEACON_ENABLED=0 se a rede reclamar de broadcast.
+export ROBO_DISCOVERY_BEACON_ENABLED="${ROBO_DISCOVERY_BEACON_ENABLED:-1}"
+
 python "$BASE_DIR/robo_server.py"

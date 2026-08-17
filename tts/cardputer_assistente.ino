@@ -63,8 +63,9 @@ using namespace websockets;
 // --- Descoberta UDP do servidor (v2.1) ---
 // ROBOT_SECRET deve ser IDENTICO ao do servidor Python.
 #define ROBOT_SECRET        "TROQUE_ESTE_SEGREDO_COMPARTILHADO"
-#define DISCO_SERVER_PORT   8766     // porta que o Raspberry escuta
-#define DISCO_LOCAL_PORT    8767     // porta local para receber a resposta
+// O Cardputer escuta na MESMA porta do servidor: e para la que o beacon em
+// broadcast e enviado, e a resposta unicast do RDISCOVER volta pela mesma via.
+#define DISCO_SERVER_PORT   8766     // porta que o Raspberry escuta e anuncia
 #define DISCO_TIMEOUT_MS    350      // espera por resposta a cada tentativa
 #define DISCO_MAX_TRIES     4        // tentativas antes do fallback
 #define DISCO_HMAC_HEX_LEN  16       // 8 bytes -> 16 hex
@@ -184,6 +185,7 @@ enum Viseme {
 /* ========================= VARIAVEIS GLOBAIS ======================== */
 WebsocketsClient client;
 WiFiUDP disco;                       // v2.1: socket UDP de descoberta
+bool    discoBound = false;          // socket ligado na porta 8766
 String  resolvedWsUrl = "";          // v2.1: URL descoberta; vazio => usa WS_URL
 
 // --- configuracao persistente ---
@@ -265,7 +267,14 @@ void onMessageCallback(WebsocketsMessage msg);
 void tratarTexto(const String& txt);
 
 String computeHmacHex(const String& msg);   // v2.1
+String computeSha256Hex(const String& msg, uint8_t hexLen);
 bool   descobrirServidor();                  // v2.1
+bool   escutarBeacon();                      // escuta passiva do beacon
+void   discoEnsure();
+void   discoReset();
+bool   discoProcessarPacote(const String& nonceEsperado);
+int    jsonInt(const String& s, const char* chave, int padrao);
+String jsonStr(const String& s, const char* chave);
 String gatewayWsUrl();                       // fallback automatico pelo DHCP
 
 void enableMic();
@@ -421,6 +430,10 @@ void loop() {
     if (client.available()) {
       client.poll();
     } else {
+      // O beacon do servidor pode chegar a qualquer momento. E barato e nao
+      // bloqueia, entao vale checar a cada volta: se o Raspberry subir depois
+      // do Cardputer, o proximo beacon resolve sem esperar o ciclo de retry.
+      escutarBeacon();
       tentarReconectarWS();
     }
 
@@ -866,6 +879,119 @@ String computeHmacHex(const String& msg) {
   return hex;
 }
 
+// SHA-256 puro (sem HMAC), truncado. Usado para validar o token_hash que o
+// servidor publica no beacon: sha256(ROBOT_SECRET)[:16].
+String computeSha256Hex(const String& msg, uint8_t hexLen) {
+  byte out[32];
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 0);
+  mbedtls_md_starts(&ctx);
+  mbedtls_md_update(&ctx, (const unsigned char*)msg.c_str(), msg.length());
+  mbedtls_md_finish(&ctx, out);
+  mbedtls_md_free(&ctx);
+
+  String hex = "";
+  for (uint8_t i = 0; i < hexLen / 2; i++) {
+    char b[3];
+    sprintf(b, "%02x", out[i]);
+    hex += b;
+  }
+  return hex;
+}
+
+// Extratores minimos de JSON. O beacon e um objeto plano e conhecido; puxar
+// uma lib de JSON para isso custaria mais RAM do que o firmware tem sobrando.
+int jsonInt(const String& s, const char* chave, int padrao) {
+  int i = s.indexOf(chave);
+  if (i < 0) return padrao;
+  i = s.indexOf(':', i);
+  if (i < 0) return padrao;
+  return s.substring(i + 1).toInt();
+}
+
+String jsonStr(const String& s, const char* chave) {
+  int i = s.indexOf(chave);
+  if (i < 0) return String("");
+  i = s.indexOf(':', i);
+  if (i < 0) return String("");
+  int a = s.indexOf('"', i);
+  if (a < 0) return String("");
+  int b = s.indexOf('"', a + 1);
+  if (b < 0) return String("");
+  return s.substring(a + 1, b);
+}
+
+// Abre o socket UDP uma unica vez e o mantem aberto.
+// Escuta na PORTA DO SERVIDOR (8766), nao numa porta local propria: e para la
+// que o servidor manda o beacon periodico em broadcast. A resposta unicast do
+// RDISCOVER volta para a mesma porta, entao um socket so atende os dois casos.
+void discoEnsure() {
+  if (discoBound) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (disco.begin(DISCO_SERVER_PORT)) discoBound = true;
+}
+
+void discoReset() {
+  if (!discoBound) return;
+  disco.stop();
+  discoBound = false;
+}
+
+// Processa um pacote UDP pendente. Aceita duas formas:
+//   "ROBOT <ws_url> <hmac>"  -> resposta ao nosso RDISCOVER (valida o nonce)
+//   {"type":"ROBO_BEACON"...} -> anuncio espontaneo do servidor
+// nonceEsperado vazio = modo passivo, so beacon.
+// Retorna true quando resolvedWsUrl foi preenchido.
+bool discoProcessarPacote(const String& nonceEsperado) {
+  int sz = disco.parsePacket();
+  if (sz <= 0) return false;
+
+  char buf[256];
+  int len = disco.read((uint8_t*)buf, sizeof(buf) - 1);
+  if (len <= 0) return false;
+  buf[len] = 0;
+
+  String resp = String(buf);
+  IPAddress origem = disco.remoteIP();
+
+  // eco do nosso proprio broadcast: chega porque escutamos a mesma porta
+  if (resp.startsWith("RDISCOVER")) return false;
+
+  if (resp.startsWith("ROBOT ") && nonceEsperado.length() > 0) {
+    int sp1 = resp.indexOf(' ');
+    int sp2 = resp.indexOf(' ', sp1 + 1);
+    if (sp2 > sp1) {
+      String url = resp.substring(sp1 + 1, sp2);
+      String mac = resp.substring(sp2 + 1);
+      mac.trim();
+
+      if (mac == computeHmacHex(nonceEsperado)) {
+        resolvedWsUrl = url;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  if (resp.indexOf("ROBO_BEACON") >= 0) {
+    String hashRecebido = jsonStr(resp, "token_hash");
+    String hashEsperado = computeSha256Hex(String(ROBOT_SECRET), DISCO_HMAC_HEX_LEN);
+
+    // Beacon sem token_hash so e aceito se nos tambem nao temos segredo.
+    if (hashRecebido.length() > 0 && hashRecebido != hashEsperado) return false;
+
+    int porta = jsonInt(resp, "ws_port", 8765);
+    if (porta <= 0 || porta > 65535) return false;
+    if (origem == IPAddress(0, 0, 0, 0)) return false;
+
+    resolvedWsUrl = String("ws://") + origem.toString() + ":" + String(porta);
+    return true;
+  }
+
+  return false;
+}
+
 // Faz broadcast "RDISCOVER <nonce>" e valida "ROBOT <ws_url> <hmac>".
 // Preenche resolvedWsUrl e retorna true em sucesso.
 // NUNCA deve ser chamada durante a gravacao do microfone.
@@ -873,7 +999,15 @@ bool descobrirServidor() {
   if (gravando) return false;
   if (WiFi.status() != WL_CONNECTED) return false;
 
-  disco.begin(DISCO_LOCAL_PORT);
+  // Override manual vence tudo: em rede com isolamento de cliente o broadcast
+  // nao circula e a descoberta nunca responderia.
+  if (cfgServer.length() > 0) {
+    resolvedWsUrl = cfgServer;
+    return true;
+  }
+
+  discoEnsure();
+  if (!discoBound) return false;
 
   for (uint8_t attempt = 0; attempt < DISCO_MAX_TRIES; attempt++) {
     char nonce[9];
@@ -906,37 +1040,26 @@ bool descobrirServidor() {
 
     unsigned long start = millis();
     while (millis() - start < DISCO_TIMEOUT_MS) {
-      int sz = disco.parsePacket();
-      if (sz > 0) {
-        char buf[160];
-        int len = disco.read((uint8_t*)buf, sizeof(buf) - 1);
-        if (len > 0) {
-          buf[len] = 0;
-          String resp = String(buf);
-
-          if (resp.startsWith("ROBOT ")) {
-            int sp1 = resp.indexOf(' ');
-            int sp2 = resp.indexOf(' ', sp1 + 1);
-            if (sp2 > sp1) {
-              String url = resp.substring(sp1 + 1, sp2);
-              String mac = resp.substring(sp2 + 1);
-              mac.trim();
-
-              if (mac == computeHmacHex(String(nonce))) {
-                resolvedWsUrl = url;
-                disco.stop();
-                return true;
-              }
-            }
-          }
-        }
-      }
+      if (discoProcessarPacote(String(nonce))) return true;
       delay(5);
     }
   }
 
-  disco.stop();
   return false;
+}
+
+// Poll nao bloqueante do beacon do servidor. Chamado no loop enquanto nao ha
+// WebSocket: se o servidor subir depois do Cardputer, o proximo beacon resolve
+// sem precisar de um ciclo completo de RDISCOVER.
+bool escutarBeacon() {
+  if (gravando) return false;
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (cfgServer.length() > 0) return false;
+
+  discoEnsure();
+  if (!discoBound) return false;
+
+  return discoProcessarPacote("");
 }
 
 String gatewayWsUrl() {
@@ -988,14 +1111,17 @@ void conectarWebSocket() {
   wsLastTry = millis();
   if (WiFi.status() != WL_CONNECTED) return;
 
-  // v2.1: prioriza a URL descoberta; se falhar, usa o gateway DHCP do hotspot.
-  String gatewayUrl = gatewayWsUrl();
-  String target = (resolvedWsUrl.length() > 0) ? resolvedWsUrl : gatewayUrl;
-  if (target.length() == 0) {
-    target = String(WS_URL);
-  }
+  // Prioridade: URL manual da configuracao > descoberta UDP > gateway DHCP >
+  // WS_URL compilado. O WS_URL virou ultimo recurso: com o Wi-Fi configuravel
+  // pelo teclado, um IP fixo no codigo quase nunca corresponde a rede em uso.
+  String target = cfgServer;
+  if (target.length() == 0) target = resolvedWsUrl;
+  if (target.length() == 0) target = gatewayWsUrl();
+  if (target.length() == 0) target = String(WS_URL);
+
   if (!client.connect(target)) {
-    // se a URL descoberta falhou, esquece-a para redescobrir depois
+    // Esquece so o resultado da descoberta; a URL manual e escolha do usuario
+    // e nao deve ser descartada por uma falha de conexao.
     resolvedWsUrl = "";
   }
 }
@@ -1004,7 +1130,10 @@ void tentarReconectarWS() {
   // nao reconectar agressivamente; nunca durante gravacao
   if (gravando) return;
   if (millis() - wsLastTry < WS_RETRY_MS) return;
-  if (WiFi.status() != WL_CONNECTED) { WiFi.reconnect(); }
+  if (WiFi.status() != WL_CONNECTED) {
+    discoReset();              // o socket UDP morre junto com a interface
+    WiFi.reconnect();
+  }
   // v2.1: tenta redescobrir se ainda nao temos URL resolvida
   if (resolvedWsUrl.length() == 0) descobrirServidor();
   conectarWebSocket();
