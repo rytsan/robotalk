@@ -232,14 +232,26 @@ python3 robo/scripts/bench_llm.py
 
 Ele usa as métricas que o próprio Ollama devolve, testa os modelos instalados e estima o custo do turno.
 
-### Dividir a carga entre dois modelos
+### Conversa e extração pedem coisas diferentes
 
-Extrair fatos é tarefa mecânica e estruturada; o `qwen2.5:1.5b` acerta 5/5 nela. Dá para usar um modelo bom na conversa e um pequeno na extração:
+Medido: conversar bem e extrair JSON bem são habilidades distintas, e o mesmo modelo raramente é bom nas duas.
+
+| modelo | tamanho | conversa em pt-BR | extração JSON |
+|---|---|---|---|
+| `gemma3:1b` | 815 MB | boa, natural | **4/7** — fraca |
+| `qwen2.5:1.5b` | 986 MB | erros de concordância | **7/7** |
+| `cnmoro/gemma3-gaia-ptbr-4b` | 2,5 GB | melhor de todas | 7/7 |
+
+O `gemma3:1b` fala português bem melhor que o `qwen2.5:1.5b` do mesmo porte, mas erra a extração estruturada. O qwen é o inverso.
+
+Por isso os dois papéis são configuráveis em separado. Para um Raspberry, a combinação que equilibra qualidade e custo usa dois modelos de ~1 GB:
 
 ```bash
-export ROBO_OLLAMA_MODEL="cnmoro/gemma3-gaia-ptbr-4b:q4_k_m"   # qualidade na resposta
-export ROBO_EXTRACTION_MODEL="qwen2.5:1.5b"                    # barato na extração
+export ROBO_OLLAMA_MODEL="gemma3:1b"          # conversa: português natural
+export ROBO_EXTRACTION_MODEL="qwen2.5:1.5b"   # extração: JSON confiável
 ```
+
+Com folga de RAM, trocar o primeiro por `cnmoro/gemma3-gaia-ptbr-4b:q4_k_m` melhora a conversa ao custo de umas 2,5 vezes mais latência.
 
 Se ainda assim ficar pesado, `ROBO_FACT_EXTRACTION=0` corta a segunda chamada por completo.
 

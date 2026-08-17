@@ -550,8 +550,14 @@ EMOJI_PATTERN = re.compile(
 )
 
 
+# O gemma responde com markdown ("**um lugar super-forte!**"). Os asteriscos
+# seriam lidos em voz alta pelo Piper e desenhados na tela sem significar nada.
+MARKDOWN_PATTERN = re.compile(r"\*{1,3}|_{2,3}|`{1,3}|^#{1,6}\s*", re.MULTILINE)
+
+
 def sanitize_reply(text: str) -> str:
     limpo = EMOJI_PATTERN.sub("", text)
+    limpo = MARKDOWN_PATTERN.sub("", limpo)
     return re.sub(r"\s+", " ", limpo).strip()
 
 
@@ -819,10 +825,30 @@ INTERROGATIVAS = (
     "quanto", "quanta", "o que", "que horas",
 )
 
+# Comando não afirma nada sobre quem fala. Sem esta lista, "Liga a luz da sala"
+# virava os fatos `tem:luz` e `tem:sala`: as duas palavras estão mesmo na frase,
+# então a ancoragem passava, e `tem` está no vocabulário permitido.
+IMPERATIVOS = {
+    "liga", "ligue", "desliga", "desligue", "acende", "acenda", "apaga", "apague",
+    "abre", "abra", "fecha", "feche", "toca", "toque", "para", "pare", "mostra",
+    "mostre", "fala", "fale", "diz", "diga", "manda", "mande", "envia", "envie",
+    "coloca", "coloque", "poe", "ponha", "aumenta", "aumente", "diminui", "diminua",
+    "repete", "repita", "conta", "conte", "busca", "busque", "procura", "procure",
+    "calcula", "calcule", "traduz", "traduza", "anota", "anote", "escreve", "escreva",
+    "grava", "grave", "toque", "reproduz", "reproduza", "aciona", "acione",
+}
+
 
 def parece_pergunta(texto: str) -> bool:
     normalizado = normalize_text(texto)
     return normalizado.endswith("?") or normalizado.startswith(INTERROGATIVAS)
+
+
+def parece_comando(texto: str) -> bool:
+    # Olha as três primeiras palavras para pegar também "por favor liga ..."
+    # e "me diz ...".
+    palavras = normalize_text(texto).split()[:3]
+    return any(p in IMPERATIVOS for p in palavras)
 
 
 def valor_ancorado(valor: str, texto_usuario: str) -> bool:
@@ -839,8 +865,9 @@ def extract_facts_with_llm(user_text: str, speaker_id: str) -> list[MemoryFact]:
     if not FACT_EXTRACTION_ENABLED or len(user_text.strip()) < FACT_MIN_CHARS:
         return []
 
-    # Pergunta não afirma nada sobre o usuário, e é onde o modelo mais inventa.
-    if parece_pergunta(user_text):
+    # Pergunta e comando não afirmam nada sobre o usuário, e são onde o modelo
+    # mais inventa.
+    if parece_pergunta(user_text) or parece_comando(user_text):
         return []
 
     data = call_ollama_json(FACT_SYSTEM_PROMPT, user_text)
