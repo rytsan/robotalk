@@ -86,6 +86,10 @@ TTS_CHUNK_DELAY_S = 0.003
 AUTO_TTS_REPLY = True
 OLLAMA_BASE_URL = os.environ.get("ROBO_OLLAMA_BASE_URL", "http://127.0.0.1:11434/api/chat").strip()
 OLLAMA_MODEL = os.environ.get("ROBO_OLLAMA_MODEL", "qwen2.5:1.5b-instruct").strip()
+# Extrair fatos é tarefa mecânica e estruturada: um modelo pequeno dá conta e
+# corta boa parte do custo do turno, que faz duas chamadas ao LLM. Vazio = usa
+# o mesmo modelo da conversa.
+EXTRACTION_MODEL = os.environ.get("ROBO_EXTRACTION_MODEL", "").strip()
 OLLAMA_TIMEOUT_S = float(os.environ.get("ROBO_OLLAMA_TIMEOUT_S", "30"))
 OLLAMA_HISTORY_LIMIT = 8
 DEFAULT_SPEAKER_ID = os.environ.get("ROBO_DEFAULT_SPEAKER_ID", "ricardo").strip() or "ricardo"
@@ -778,7 +782,7 @@ def call_ollama_json(system_prompt: str, user_text: str, max_tokens: int = 220) 
         return None
 
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": EXTRACTION_MODEL or OLLAMA_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},

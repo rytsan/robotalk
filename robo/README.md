@@ -212,7 +212,38 @@ Testados com o system prompt real do robô, nesta ordem de preferência:
 
 O `qwen3.5` é modelo de raciocínio e devolve conteúdo vazio pela API de chat; não serve aqui sem tratamento à parte.
 
-O gemma afinado para pt-BR responde de forma mais natural e mais curta, que é o que este robô pede, e ainda foi o mais rápido. Ele responde com emoji: o servidor remove antes de mandar para a tela e para o Piper, porque o Cardputer usa fonte ASCII e o Piper não fala emoji.
+**A coluna de velocidade acima foi medida numa máquina de desenvolvimento com GPU e não vale para o Raspberry.** Ali o `qwen2.5:1.5b` fez 170 tokens/s; num Pi 5, em CPU pura, o mesmo modelo faz algo entre 8 e 12. A diferença é de uma a duas ordens de grandeza.
+
+Geração de token é limitada por banda de memória, então o custo escala com o **tamanho do modelo**: no Pi, um modelo de 2,5 GB é cerca de 2,5 vezes mais lento que um de 986 MB. Estimativa grosseira para uma resposta de 40 tokens no Pi 5:
+
+| modelo | tamanho | tok/s estimado | resposta | turno* |
+|---|---|---|---|---|
+| `qwen2.5:1.5b` | 986 MB | 8–12 | 3–5 s | 6–10 s |
+| `cnmoro/gemma3-gaia-ptbr-4b` | 2,5 GB | 3–5 | 8–13 s | 16–26 s |
+| `qwen2.5:7b-instruct` | 4,7 GB | 2–3 | 15–20 s | 30–40 s |
+
+\* o turno faz **duas** chamadas ao LLM: a resposta e a extração de fatos. Whisper e Piper vêm por cima.
+
+Não confie nesta tabela: **meça no seu Pi** com
+
+```bash
+python3 robo/scripts/bench_llm.py
+```
+
+Ele usa as métricas que o próprio Ollama devolve, testa os modelos instalados e estima o custo do turno.
+
+### Dividir a carga entre dois modelos
+
+Extrair fatos é tarefa mecânica e estruturada; o `qwen2.5:1.5b` acerta 5/5 nela. Dá para usar um modelo bom na conversa e um pequeno na extração:
+
+```bash
+export ROBO_OLLAMA_MODEL="cnmoro/gemma3-gaia-ptbr-4b:q4_k_m"   # qualidade na resposta
+export ROBO_EXTRACTION_MODEL="qwen2.5:1.5b"                    # barato na extração
+```
+
+Se ainda assim ficar pesado, `ROBO_FACT_EXTRACTION=0` corta a segunda chamada por completo.
+
+O gemma afinado para pt-BR responde de forma mais natural e mais curta, que é o que este robô pede. Ele responde com emoji: o servidor remove antes de mandar para a tela e para o Piper, porque o Cardputer usa fonte ASCII e o Piper não fala emoji.
 
 ### Data e hora
 
