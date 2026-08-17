@@ -111,6 +111,13 @@ using namespace websockets;
 #define HEAD_W  208
 #define HEAD_H  92
 
+// spinner do estado "Pensando"
+// Extensao maxima: ORBIT_R + DOT_R = 17 px do centro, dentro do EYE_BOX/2 = 22.
+#define THINK_STEPS   8          // posicoes na orbita (45 graus cada)
+#define THINK_ORBIT_R 13         // raio da orbita
+#define THINK_DOT_R   4          // raio do ponto principal
+#define THINK_TAIL    3          // ponto + 2 caudas menores
+
 // olhos
 #define EYE_CY      52
 #define L_EYE_CX    80
@@ -227,7 +234,6 @@ RobotMood currentMood = MOOD_NEUTRAL;
 RobotState lastDrawnState = STATE_ERROR;     // forca primeiro desenho
 unsigned long lastAnimMs   = 0;
 int   animFrame   = 0;               // contador generico de animacao
-int   gazeDir     = 1;               // 0=esq 1=centro 2=dir (THINKING)
 int   thinkDots   = 0;               // 0..3 pontinhos
 // --- animacao de fala por visema ---
 Viseme   currentViseme = VIS_CLOSED;
@@ -1777,9 +1783,17 @@ void drawEyes() {
         d.fillRoundRect(cx - 13, EYE_CY - 5, 26, 10, 4, col);
         break;
 
-      case STATE_THINKING: {                    // olhos olhando p/ os lados
-        int off = (gazeDir == 0) ? -10 : (gazeDir == 2 ? 10 : 0);
-        d.fillRoundRect(cx - 10 + off, EYE_CY - 11, 20, 22, 6, col);
+      case STATE_THINKING: {
+        // Spinner: um ponto principal com duas caudas menores girando na
+        // orbita do olho. Antes os olhos corriam para os lados, o que lia como
+        // "desconfiado" e nao como "processando".
+        for (int passo = 0; passo < THINK_TAIL; passo++) {
+          int indice = ((animFrame - passo) % THINK_STEPS + THINK_STEPS) % THINK_STEPS;
+          float ang = indice * (TWO_PI / THINK_STEPS);
+          int px = cx + (int)(cosf(ang) * THINK_ORBIT_R);
+          int py = EYE_CY + (int)(sinf(ang) * THINK_ORBIT_R);
+          d.fillCircle(px, py, THINK_DOT_R - passo, col);
+        }
         break;
       }
 
@@ -1894,7 +1908,6 @@ void setRobotState(RobotState s) {
   currentState = s;
   // reset de animacao
   animFrame = 0;
-  gazeDir   = 1;
   thinkDots = 0;
   blinking  = false;
   lastAnimMs = millis();
@@ -1943,13 +1956,20 @@ void animateRobotFace() {
       // estado curto e estatico
       break;
 
-    case STATE_THINKING:
+    case STATE_THINKING: {
       animFrame++;
-      gazeDir   = animFrame % 3;          // 0 esq, 1 centro, 2 dir
-      thinkDots = (animFrame % 4);        // 0..3 pontinhos
-      drawEyes();
-      drawStatusText();
+      drawEyes();                         // spinner avanca um passo por frame
+
+      // Os pontinhos do rodape trocam a cada ~4 frames. No mesmo ritmo do
+      // spinner eles piscavam rapido demais, e redesenhar o texto a 90 ms era
+      // trafego de SPI desnecessario.
+      int novosPontos = (animFrame / 4) % 4;
+      if (novosPontos != thinkDots) {
+        thinkDots = novosPontos;
+        drawStatusText();
+      }
       break;
+    }
 
     case STATE_SPEAKING:
       // a boca e dirigida por tickMouth() dentro de tocarArquivoRaw().

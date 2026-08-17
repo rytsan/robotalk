@@ -46,9 +46,26 @@ O estado é derivado no próprio firmware: `LISTENING` ao receber `RECORDING`, `
 
 `MOOD_NEUTRAL`, `MOOD_HAPPY`, `MOOD_SAD`, `MOOD_CONFUSED`, `MOOD_EXCITED`, `MOOD_CONCERNED`.
 
-A forma de humor é aplicada em `IDLE` e em `SPEAKING`. Em `SPEAKING` o piscar fica desligado, senão competiria com o lip sync. Nos demais estados a forma do olho é a do estado (pulso em `LISTENING`, olhar lateral em `THINKING`, X em `ERROR`).
+A forma de humor é aplicada em `IDLE` e em `SPEAKING`. Em `SPEAKING` o piscar fica desligado, senão competiria com o lip sync. Nos demais estados a forma do olho é a do estado (pulso em `LISTENING`, spinner em `THINKING`, X em `ERROR`).
 
 O humor não expira sozinho: ele vale até o próximo `EMO`. Como o servidor manda um `EMO` a cada interação, na prática ele é sempre atualizado.
+
+## Spinner do "Pensando"
+
+Em `STATE_THINKING` cada olho vira uma órbita com um ponto girando, mais duas caudas menores atrás dele. As caudas é que fazem o movimento ser lido como rotação; um ponto solto parece só pular de lugar.
+
+```text
+THINK_STEPS   8     posicoes na orbita, 45 graus cada
+THINK_ORBIT_R 13    raio da orbita
+THINK_DOT_R   4     raio do ponto principal (caudas: 3 e 2)
+THINK_TAIL    3     ponto + 2 caudas
+```
+
+A extensão máxima é `ORBIT_R + DOT_R = 17 px` do centro, dentro dos 22 px de meia-caixa do olho. Uma volta completa leva 8 frames de 90 ms, ou seja 720 ms.
+
+A versão anterior movia os olhos para os lados a cada 90 ms. O gesto estava errado: lia como "desconfiado" em vez de "processando", e a velocidade deixava o rosto nervoso.
+
+Os pontinhos do rodapé avançam a cada 4 frames, não a cada frame. No mesmo ritmo do spinner eles piscavam rápido demais, e redesenhar o texto a 90 ms era tráfego de SPI sem ganho.
 
 ## Lip sync por visema
 
