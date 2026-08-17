@@ -20,12 +20,22 @@ import ipaddress
 import json
 import os
 import socket
+import struct
 import subprocess
 import time
 import wave
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+
+try:
+    import fcntl                               # só existe em POSIX
+except ImportError:                            # pragma: no cover
+    fcntl = None                               # type: ignore[assignment]
+
+# ioctls de rede do Linux, usados para descobrir o broadcast de cada interface
+SIOCGIFADDR = 0x8915
+SIOCGIFNETMASK = 0x891B
 
 import sentiment
 import websockets
@@ -52,6 +62,7 @@ DISCOVERY_ENABLED = os.environ.get("ROBO_DISCOVERY_ENABLED", "1").strip() != "0"
 DISCOVERY_BEACON_ENABLED = os.environ.get("ROBO_DISCOVERY_BEACON_ENABLED", "0").strip() == "1"
 DISCOVERY_PORT = int(os.environ.get("ROBO_DISCOVERY_PORT", "8766"))
 DISCOVERY_INTERVAL_S = float(os.environ.get("ROBO_DISCOVERY_INTERVAL_S", "1.0"))
+BEACON_TARGETS_REFRESH_S = float(os.environ.get("ROBO_BEACON_REFRESH_S", "10.0"))
 DISCOVERY_SERVER_ID = os.environ.get("ROBO_DISCOVERY_SERVER_ID", "robo-main").strip() or "robo-main"
 DISCOVERY_TOKEN = os.environ.get("ROBO_DISCOVERY_TOKEN", "").strip()
 DISCOVERY_ADVERTISE_HOST = os.environ.get("ROBO_DISCOVERY_ADVERTISE_HOST", "").strip()
@@ -166,6 +177,114 @@ def advertised_host_for(client_ip: str) -> str:
     return local_ip_for(client_ip)
 
 
+def interface_broadcasts() -> list[str]:
+    """Endereço de broadcast dirigido de cada interface IPv4 ativa.
+
+    Usa ioctl direto em vez de subprocess ou dependência externa. É específico
+    de Linux, que é onde o servidor roda; em outro sistema devolve lista vazia
+    e o chamador cai no fallback.
+    """
+    if fcntl is None:
+        return []
+
+    targets: list[str] = []
+
+    try:
+        names = [name for _index, name in socket.if_nameindex()]
+    except OSError:
+        return targets
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for name in names:
+            if name == "lo":
+                continue
+
+            request = struct.pack("256s", name.encode("utf-8")[:15])
+            try:
+                addr = socket.inet_ntoa(fcntl.ioctl(probe.fileno(), SIOCGIFADDR, request)[20:24])
+                mask = socket.inet_ntoa(fcntl.ioctl(probe.fileno(), SIOCGIFNETMASK, request)[20:24])
+            except OSError:
+                continue                       # interface sem IPv4 no momento
+
+            try:
+                network = ipaddress.ip_network(f"{addr}/{mask}", strict=False)
+            except ValueError:
+                continue
+
+            if network.prefixlen >= 31:        # /31 e /32 não têm broadcast
+                continue
+
+            broadcast = str(network.broadcast_address)
+            if broadcast not in targets:
+                targets.append(broadcast)
+    finally:
+        probe.close()
+
+    return targets
+
+
+def hotspot_broadcast() -> str | None:
+    """Broadcast da rede do hotspot, derivado da CIDR já configurada.
+
+    Serve de rede de segurança: se a enumeração de interfaces falhar mas o
+    hotspot estiver de pé, o beacon ainda chega nos clientes dele.
+    """
+    if not DISCOVERY_HOTSPOT_CIDR:
+        return None
+
+    try:
+        network = ipaddress.ip_network(DISCOVERY_HOTSPOT_CIDR, strict=False)
+    except ValueError:
+        return None
+
+    if network.prefixlen >= 31:
+        return None
+
+    return str(network.broadcast_address)
+
+
+def beacon_targets() -> list[str]:
+    """Para onde mandar o beacon.
+
+    Broadcast dirigido por interface, e não 255.255.255.255: o endereço global
+    depende da rota padrão, que num hotspot isolado simplesmente não existe.
+    O envio falhava a cada intervalo e enchia o log de erro.
+
+    Efeito colateral desejado: mandando para 10.42.0.255, o kernel escolhe
+    10.42.0.1 como origem, que é o endereço que o Cardputer precisa ver.
+    """
+    targets = interface_broadcasts()
+
+    hotspot = hotspot_broadcast()
+    if hotspot and hotspot not in targets:
+        targets.append(hotspot)
+
+    if not targets:
+        targets.append("255.255.255.255")      # último recurso
+    return targets
+
+
+def send_beacon(sock: socket.socket, targets: list[str], failed: set[str]) -> None:
+    """Envia o beacon para cada alvo, sem repetir erro no log.
+
+    Um alvo que falha é anunciado uma vez e depois silenciado até voltar.
+    """
+    payload = discovery_payload()
+
+    for target in targets:
+        try:
+            sock.sendto(payload, (target, DISCOVERY_PORT))
+        except OSError as exc:
+            if target not in failed:
+                failed.add(target)
+                print(f"Beacon UDP falhou para {target}: {exc}")
+        else:
+            if target in failed:
+                failed.discard(target)
+                print(f"Beacon UDP voltou a funcionar para {target}.")
+
+
 def discovery_payload() -> bytes:
     payload = {
         "type": "ROBO_BEACON",
@@ -224,15 +343,27 @@ async def discovery_beacon_loop() -> None:
 
     loop = asyncio.get_running_loop()
     last_broadcast_at = 0.0
+    last_targets_at = 0.0
+    targets: list[str] = []
+    failed: set[str] = set()
+
     try:
         while True:
             now = loop.time()
+
+            # A lista é recalculada de tempos em tempos porque o hotspot pode
+            # subir depois do servidor, criando uma interface nova.
+            if DISCOVERY_BEACON_ENABLED and now - last_targets_at >= BEACON_TARGETS_REFRESH_S:
+                last_targets_at = now
+                novos = beacon_targets()
+                if novos != targets:
+                    targets = novos
+                    failed.intersection_update(targets)
+                    print(f"Beacon UDP transmitindo para: {', '.join(targets)}")
+
             if DISCOVERY_BEACON_ENABLED and now - last_broadcast_at >= DISCOVERY_INTERVAL_S:
                 last_broadcast_at = now
-                try:
-                    sock.sendto(discovery_payload(), ("255.255.255.255", DISCOVERY_PORT))
-                except OSError as exc:
-                    print(f"Falha enviando discovery UDP: {exc}")
+                send_beacon(sock, targets, failed)
 
             try:
                 data, addr = await asyncio.wait_for(loop.sock_recvfrom(sock, 512), timeout=0.25)

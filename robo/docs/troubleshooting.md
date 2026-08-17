@@ -43,8 +43,14 @@
 ### O beacon não chega, mas o RDISCOVER funciona
 
 - **Sintoma**: o servidor só é encontrado quando o Cardputer inicia a busca, nunca sozinho.
-- **Causa**: o beacon sai para `255.255.255.255` pela rota padrão. Num Raspberry que é hotspot e também está numa LAN, ele pode sair pela interface errada.
-- **Solução**: não há problema real; o `RDISCOVER` cobre o caso. Ver `discovery.md`.
+- **Verificar**: no boot o servidor imprime `Beacon UDP transmitindo para: ...`. Se a rede do Cardputer não estiver na lista, o beacon não alcança ele.
+- **Causa comum**: a interface subiu depois do servidor. A lista é recalculada a cada 10 s; espere um ciclo.
+- **Solução**: se a rede ainda não aparecer, ajustar `ROBO_DISCOVERY_HOTSPOT_CIDR` para a faixa correta. O `RDISCOVER` continua cobrindo o caso enquanto isso.
+
+### Quero ligar o Cardputer direto no Raspberry, sem roteador
+
+- **O que não funciona**: ad-hoc / IBSS. O ESP32 não implementa esse modo, e não há como contornar por código.
+- **Solução**: pôr o Raspberry como ponto de acesso com `nmcli device wifi hotspot`. Ver a seção de ligação direta em `discovery.md`.
 
 ### A senha do Wi-Fi não é aceita
 

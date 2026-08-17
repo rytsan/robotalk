@@ -77,13 +77,27 @@ O beacon vem **ligado por padrão** em `server/run_server.sh`. Para desligar:
 export ROBO_DISCOVERY_BEACON_ENABLED="0"
 ```
 
-### Limitação do beacon em hotspot
+### Para onde o beacon é transmitido
 
-O beacon é enviado para `255.255.255.255`, que sai pela **rota padrão** da máquina. Se o Raspberry estiver como hotspot e também conectado a uma LAN, o beacon pode sair pela interface errada, ou chegar com o IP de origem da LAN em vez do `10.42.0.1`.
+O beacon **não** usa `255.255.255.255`. Esse endereço depende da rota padrão da máquina, que num hotspot isolado simplesmente não existe: o envio falharia a cada intervalo e encheria o log de erro.
 
-O caminho `RDISCOVER` não tem esse problema: ele responde por unicast e escolhe o endereço anunciado com `client_in_hotspot()` / `advertised_host_for()`, olhando de onde veio a requisição.
+Em vez disso, o servidor calcula o **broadcast dirigido de cada interface IPv4 ativa** e transmite para todos. O broadcast da rede em `ROBO_DISCOVERY_HOTSPOT_CIDR` é acrescentado como rede de segurança, caso a enumeração de interfaces falhe mas o hotspot esteja de pé.
 
-Conclusão prática: **em hotspot, quem resolve é o `RDISCOVER`**. O beacon é um complemento para rede plana comum. Se for necessário beacon confiável em hotspot, ele precisa passar a transmitir por interface, usando o endereço de broadcast de cada uma.
+No boot, o console mostra os alvos escolhidos:
+
+```text
+Beacon UDP transmitindo para: 192.168.0.255, 10.42.0.255
+```
+
+A lista é recalculada a cada `ROBO_BEACON_REFRESH_S` segundos (padrão `10`), porque o hotspot pode subir depois do servidor e criar uma interface nova.
+
+Isso tem um efeito colateral necessário: transmitindo para `10.42.0.255`, o kernel escolhe `10.42.0.1` como endereço de origem — que é exatamente o endereço que o Cardputer precisa ver, já que o beacon não carrega URL.
+
+Se um alvo falhar, o erro é registrado **uma vez** e silenciado até voltar a funcionar. Sem isso, uma interface sem rota geraria uma linha de log por segundo, para sempre.
+
+`255.255.255.255` continua existindo como último recurso, usado apenas quando nenhuma interface pôde ser determinada.
+
+A enumeração de interfaces usa `ioctl` e é específica de Linux. Em outro sistema, ela devolve lista vazia e o servidor cai no CIDR do hotspot ou no último recurso.
 
 ## Fluxo no Cardputer
 
@@ -114,6 +128,28 @@ URL manual da configuracao   (tela W -> Servidor)
 ```
 
 Uma falha de conexão esquece apenas o resultado da descoberta. A URL manual é escolha explícita do usuário e não é descartada sozinha.
+
+## Ligação direta, sem roteador
+
+O Cardputer **não** consegue fazer ad-hoc real (IBSS) com o Raspberry. O driver Wi-Fi do ESP32/ESP32-S3 implementa apenas STA, SoftAP e AP+STA; IBSS e Wi-Fi Direct não existem no stack da Espressif. Não é limitação do firmware deste projeto e não há como contornar por código.
+
+A forma correta de ter os dois conversando sem roteador é o **Raspberry como ponto de acesso**, com o Cardputer entrando como estação normal:
+
+```bash
+nmcli device wifi hotspot ssid robo-net password <sua_senha>
+```
+
+O NetworkManager cria a rede em `10.42.0.1/24` com DHCP, que é exatamente o padrão de `ROBO_DISCOVERY_HOTSPOT_CIDR` e `ROBO_DISCOVERY_HOTSPOT_HOST`. Depois disso, basta escolher `robo-net` na tela `W` do Cardputer.
+
+Pontos a considerar:
+
+- O Pi 5 tem um rádio só. Enquanto ele for AP, perde o Wi-Fi como cliente; a Ethernet continua funcionando. Para este projeto isso é indiferente, porque Whisper, Piper e Ollama são todos locais.
+- Nesse modo as duas vias de descoberta funcionam: o `RDISCOVER` responde por unicast com `10.42.0.1`, e o beacon transmite para `10.42.0.255` com o mesmo endereço de origem.
+
+Alternativas descartadas:
+
+- **Cardputer como AP**: funciona, mas o SoftAP do ESP32 é fraco e inverteria quem distribui o DHCP, exigindo reescrever a descoberta.
+- **ESP-NOW**: é direto e dispensa AP, mas o Raspberry não fala ESP-NOW nativamente — precisaria de um segundo ESP32 como ponte. O limite de cerca de 250 bytes por pacote também é ruim para o áudio deste projeto.
 
 ## Handshake WebSocket
 
@@ -150,7 +186,12 @@ export ROBO_DISCOVERY_PORT="8766"
 export ROBO_DISCOVERY_INTERVAL_S="1.0"
 export ROBO_DISCOVERY_SERVER_ID="robo-main"
 export ROBO_DISCOVERY_TOKEN="TROQUE_ESTE_SEGREDO_COMPARTILHADO"
+export ROBO_BEACON_REFRESH_S="10.0"
+export ROBO_DISCOVERY_HOTSPOT_CIDR="10.42.0.0/24"
+export ROBO_DISCOVERY_HOTSPOT_HOST="10.42.0.1"
 ```
+
+Os dois últimos valem para as duas vias: o `RDISCOVER` os usa para escolher o endereço anunciado a um cliente do hotspot, e o beacon os usa para calcular um alvo de broadcast. O padrão `10.42.0.0/24` já corresponde à sub-rede que o NetworkManager cria no modo compartilhado.
 
 Para usar o firmware v2 com HMAC, `ROBO_DISCOVERY_TOKEN` precisa ser igual ao `ROBOT_SECRET` do `.ino`. O `server/run_server.sh` já define o valor padrão acima, compatível com os firmwares do repositório. Se trocar o segredo no `.ino`, rode o servidor assim:
 
