@@ -1,0 +1,6 @@
+# A Arduino IDE reescreve o sketch com CRLF no Windows. Sem normalizar, cada
+# gravacao vira um diff de arquivo inteiro e esconde a mudanca real.
+*.ino text
+*.md   text
+*.py   text
+*.sh   text eol=lf

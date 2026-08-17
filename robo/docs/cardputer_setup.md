@@ -37,21 +37,19 @@ Se a IDE pedir dependências adicionais, instale também as sugeridas para mante
 
 ### 6. Abrir o firmware
 
-O firmware principal do projeto é:
+O firmware do projeto é **um só**:
 
-- `tts/cardputer_assistente.ino`
+```text
+tts/cardputer_assistente/cardputer_assistente.ino
+```
 
-É ele que tem o rosto animado, o lip sync por visema, a tela de configuração de rede e a descoberta do servidor. O firmware simples, útil para depurar protocolo e áudio isoladamente, fica em:
+Abra esse arquivo diretamente na Arduino IDE. É ele que tem o rosto animado, o lip sync por visema, a tela de configuração de rede e a descoberta do servidor.
 
-- `robo/cardputer/firmware/cardputer_robot_lab/cardputer_robot_lab.ino`
-
-Abra um desses arquivos diretamente na Arduino IDE.
+Atenção ao caminho: o firmware fica em `tts/`, e não em `robo/cardputer/`, que é onde a estrutura de pastas sugere. É uma inversão herdada da história do projeto.
 
 ### 7. Ajustar a rede
 
-**No firmware principal, não é mais necessário editar o código para trocar de rede.** SSID e senha são configurados no próprio Cardputer, pelo teclado, e ficam salvos na NVS.
-
-Se você abriu o firmware mínimo (`cardputer_robot_lab.ino`), ele não tem essa tela: lá o `WIFI_SSID`, o `WIFI_PASS` e o `WS_URL` ainda precisam ser editados no topo do arquivo antes de gravar.
+**Não é necessário editar o código para trocar de rede.** SSID e senha são configurados no próprio Cardputer, pelo teclado, e ficam salvos na NVS.
 
 A tela de configuração abre em quatro situações:
 

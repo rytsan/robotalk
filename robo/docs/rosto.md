@@ -1,6 +1,6 @@
 # Rosto e animação
 
-O rosto vive no firmware `tts/cardputer_assistente.ino`. Tela de 240x135, cabeça desenhada uma vez e atualizada por regiões sujas (olhos, boca, rodapé, bateria).
+O rosto vive no firmware `tts/cardputer_assistente/cardputer_assistente.ino`. Tela de 240x135, cabeça desenhada uma vez e atualizada por regiões sujas (olhos, boca, rodapé, bateria).
 
 ## Dois canais independentes
 

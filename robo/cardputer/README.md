@@ -2,12 +2,17 @@
 
 ## Firmware
 
-Há dois sketches no workspace:
+Há **um** firmware:
 
-- `tts/cardputer_assistente.ino` — **firmware principal**. Rosto animado, lip sync por visema, configuração de rede pelo teclado e descoberta do servidor.
-- `robo/cardputer/firmware/cardputer_robot_lab/cardputer_robot_lab.ino` — versão mínima, útil para depurar protocolo e áudio isoladamente.
+```text
+tts/cardputer_assistente/cardputer_assistente.ino
+```
 
-Repare na inversão: o firmware atual mora na pasta `tts/`, que é legada para o resto do projeto. Os `.py` daquela pasta são protótipos já consolidados em `robo/server/`.
+Rosto animado, lip sync por visema, configuração de rede pelo teclado e descoberta do servidor.
+
+Repare na inversão: o firmware mora na pasta `tts/`, que é legada para o resto do projeto. Os `.py` daquela pasta são protótipos já consolidados em `robo/server/`.
+
+Existiu um segundo sketch, `cardputer_robot_lab.ino`, como versão mínima de depuração. Foi removido: ele não tinha rosto nem tela de configuração, e a semelhança de nome levava a gravar o firmware errado e concluir que o projeto estava quebrado. Está no histórico do git se algum dia fizer falta.
 
 ## O que ajustar antes de gravar
 
@@ -19,9 +24,7 @@ Só o segredo compartilhado:
 
 Ele precisa ser idêntico ao `ROBO_DISCOVERY_TOKEN` do servidor. Se divergir, o Cardputer rejeita a resposta da descoberta em silêncio e nunca acha o Raspberry.
 
-No firmware principal, SSID, senha e endereço do servidor **não** são mais editados no código: ficam na NVS e são configurados no próprio aparelho.
-
-O firmware mínimo (`cardputer_robot_lab.ino`) não tem tela de configuração. Nele o SSID, a senha e o `WS_URL` continuam sendo `const char*` no topo do arquivo, e precisam ser editados antes de gravar. É proposital: ele existe para depurar protocolo e áudio com o mínimo de código no caminho.
+SSID, senha e endereço do servidor **não** são editados no código: ficam na NVS e são configurados no próprio aparelho, pela tecla `W`.
 
 ## Controles do firmware
 

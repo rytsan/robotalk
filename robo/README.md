@@ -20,8 +20,7 @@ O ciclo principal já está implementado de ponta a ponta:
 - `server/robo_server.py`: servidor Python persistente no Raspberry.
 - `server/memory_store.py`: memória persistente híbrida em SQLite.
 - `server/sentiment.py`: análise de sentimento da fala do usuário.
-- `../tts/cardputer_assistente.ino`: firmware principal do Cardputer.
-- `cardputer/firmware/cardputer_robot_lab/cardputer_robot_lab.ino`: firmware mínimo para depuração.
+- `../tts/cardputer_assistente/cardputer_assistente.ino`: firmware do Cardputer.
 - `server/voices/`: voz Piper usada para TTS.
 - `server/mic_tests/`: capturas de microfone salvas pelo servidor.
 - `server/tts_out/`: textos, WAVs e RAWs gerados pelo Piper.
@@ -77,10 +76,13 @@ No código atual, `AUTO_TTS_REPLY` começa como `True`.
 
 ## Cardputer
 
-Há dois sketches no workspace:
+O firmware é um só:
 
-- `tts/cardputer_assistente.ino`: **firmware principal**. Rosto animado, lip sync por visema, configuração de rede pelo teclado e descoberta do servidor.
-- `robo/cardputer/firmware/cardputer_robot_lab/cardputer_robot_lab.ino`: versão mínima, útil para depurar protocolo e áudio isoladamente.
+```text
+tts/cardputer_assistente/cardputer_assistente.ino
+```
+
+Rosto animado, lip sync por visema, configuração de rede pelo teclado e descoberta do servidor. Note que ele fica em `tts/`, e não em `robo/cardputer/`.
 
 Antes de gravar, o único valor a conferir é o segredo compartilhado:
 
