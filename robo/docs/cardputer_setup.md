@@ -77,13 +77,26 @@ Na tela de configuração:
 | `Ctrl` | volta |
 | `Del` | apaga; com o campo vazio, volta |
 
-O menu tem cinco itens:
+O menu tem seis itens:
 
 - **Escolher rede Wi-Fi**: escaneia e lista as redes ao alcance. `*` marca rede com senha, as barras mostram o sinal.
+- **Conectar agora**: reconecta usando a credencial já salva, sem re-escolher a rede nem redigitar a senha. É o item para quando o roteador estava desligado no boot.
 - **Rede oculta (digitar SSID)**: para redes que não aparecem no scan.
 - **Servidor**: `auto` usa descoberta por UDP; preencher com uma URL (`ws://192.168.0.50:8765`) força um endereço fixo. Deixe vazio para voltar ao automático.
 - **Esquecer rede salva**: limpa a credencial da NVS.
 - **Sair**: fecha e tenta conectar.
+
+No rodapé do menu aparece o estado da rede:
+
+```text
+Salva:  robo-net
+Online: 10.42.0.7 (robo-net)      <- verde
+Offline                            <- vermelho
+```
+
+`Salva` é o que está na NVS; `Online` é a conexão real no momento. Os dois podem divergir, por exemplo logo depois de escolher uma rede nova que ainda não conectou.
+
+Ao escolher uma rede que **já é a salva**, o campo de senha vem preenchido com a senha conhecida e o título mostra `(salva)`. Basta `Enter` para reconectar; para trocar a senha, apague com `Del` e digite a nova.
 
 A senha aparece em texto claro na tela, de propósito: digitar às cegas neste teclado gera mais erro do que o mascaramento evita.
 

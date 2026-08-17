@@ -306,6 +306,7 @@ void setupDrawText();
 void setupBusy(const String& linha1, const String& linha2);
 void setupScanRedes();
 void setupAbrirTexto(TextTarget alvo, const String& titulo, const String& inicial);
+void setupPedirSenha(const String& ssid);
 void setupConfirmarTexto();
 void setupConectarRede(const String& ssid, const String& pass);
 void setupTeclado();
@@ -508,14 +509,26 @@ void conectarWifi() {
  * tecla Ctrl sozinha nao gere evento na sua versao da lib.
  */
 
-static const char* MENU_ITENS[] = {
+// Indices nomeados: o switch de acao e o desenho dependem da ordem, e com
+// numero cru qualquer item novo quebraria os dois em silencio.
+enum MenuItem {
+  MENU_ESCOLHER = 0,
+  MENU_CONECTAR,
+  MENU_OCULTA,
+  MENU_SERVIDOR,
+  MENU_ESQUECER,
+  MENU_SAIR,
+  MENU_TOTAL
+};
+
+static const char* MENU_ITENS[MENU_TOTAL] = {
   "Escolher rede Wi-Fi",
+  "Conectar agora",
   "Rede oculta (digitar SSID)",
   "Servidor",
   "Esquecer rede salva",
   "Sair",
 };
-static const int MENU_TOTAL = 5;
 
 void setupCabecalho(const String& titulo) {
   auto& d = M5Cardputer.Display;
@@ -560,19 +573,40 @@ void setupDrawMenu() {
     d.print(MENU_ITENS[i]);
 
     // o item "Servidor" mostra o valor atual na propria linha
-    if (i == 2) {
+    if (i == MENU_SERVIDOR) {
       d.print(": ");
       d.print(cfgServer.length() ? "manual" : "auto");
     }
     d.print("   ");
   }
 
-  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  // Status da rede. Sem isto, a tela que existe justamente para resolver rede
+  // nao diz em que pe a rede esta.
   int y = UI_LIST_TOP + (MENU_TOTAL + 1) * UI_LINE_H;
-  d.setCursor(4, y);
-  d.print("Rede: ");
-  d.print(cfgSsid.length() ? cfgSsid : String("(padrao do firmware)"));
 
+  String salva = cfgSsid.length() ? cfgSsid : String("(padrao do firmware)");
+  if (salva.length() > 31) salva = salva.substring(0, 30) + "~";
+
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  d.setCursor(4, y);
+  d.print("Salva: ");
+  d.print(salva);
+
+  bool online = (WiFi.status() == WL_CONNECTED);
+  d.setTextColor(online ? TFT_GREEN : TFT_RED, TFT_BLACK);
+  d.setCursor(4, y + UI_LINE_H);
+
+  if (online) {
+    String atual = WiFi.SSID();
+    if (atual.length() > 20) atual = atual.substring(0, 19) + "~";
+    d.print("Online: ");
+    d.print(WiFi.localIP().toString());
+    if (atual.length()) { d.print(" ("); d.print(atual); d.print(")"); }
+  } else {
+    d.print("Offline");
+  }
+
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
   setupRodape("; sobe  . desce  Enter ok  Ctrl volta");
 }
 
@@ -683,6 +717,15 @@ void setupAbrirTexto(TextTarget alvo, const String& titulo, const String& inicia
   setupDraw();
 }
 
+// Abre o campo de senha para uma rede. Se for a rede que ja esta salva, comeca
+// com a senha conhecida em vez de obrigar a redigitar tudo de novo.
+void setupPedirSenha(const String& ssid) {
+  bool conhecida = (ssid == cfgSsid && cfgPass.length() > 0);
+  String titulo = conhecida ? ("Senha de " + ssid + " (salva)")
+                            : ("Senha de " + ssid);
+  setupAbrirTexto(TXT_PASS, titulo, conhecida ? cfgPass : String(""));
+}
+
 void setupConectarRede(const String& ssid, const String& pass) {
   setupBusy("Conectando em:", ssid);
 
@@ -724,7 +767,7 @@ void setupConfirmarTexto() {
         setupDraw();
         return;
       }
-      setupAbrirTexto(TXT_PASS, "Senha de " + pendingSsid, "");
+      setupPedirSenha(pendingSsid);
       break;
 
     case TXT_SERVER:
@@ -821,16 +864,43 @@ void setupTeclado() {
 
     if (st.enter) {
       switch (menuIndex) {
-        case 0: setupScanRedes(); break;
-        case 1: setupAbrirTexto(TXT_SSID, "SSID da rede oculta", ""); break;
-        case 2: setupAbrirTexto(TXT_SERVER, "Servidor (vazio = auto)", cfgServer); break;
-        case 3:
+        case MENU_ESCOLHER:
+          setupScanRedes();
+          break;
+
+        case MENU_CONECTAR: {
+          // Reconecta com o que ja esta salvo, sem re-escolher a rede nem
+          // redigitar a senha. Cobre o caso do roteador estar fora no boot.
+          if (!temConfigWifi()) {
+            setupBusy("Nenhuma rede salva.", "Escolha uma no menu.");
+            delay(1400);
+            setupDraw();
+            break;
+          }
+          String ssid = cfgSsid.length() ? cfgSsid : String(WIFI_SSID);
+          String pass = cfgPass.length() ? cfgPass : String(WIFI_PASS);
+          setupConectarRede(ssid, pass);
+          break;
+        }
+
+        case MENU_OCULTA:
+          setupAbrirTexto(TXT_SSID, "SSID da rede oculta", "");
+          break;
+
+        case MENU_SERVIDOR:
+          setupAbrirTexto(TXT_SERVER, "Servidor (vazio = auto)", cfgServer);
+          break;
+
+        case MENU_ESQUECER:
           configSaveWifi("", "");
           setupBusy("Rede esquecida.", "Escolha outra no menu.");
           delay(1200);
           setupDraw();
           break;
-        case 4: setupExit(true); break;
+
+        case MENU_SAIR:
+          setupExit(true);
+          break;
       }
     }
     return;
@@ -846,7 +916,7 @@ void setupTeclado() {
     if (st.enter) {
       pendingSsid = netSsid[netIndex];
       if (netOpen[netIndex]) setupConectarRede(pendingSsid, "");
-      else                   setupAbrirTexto(TXT_PASS, "Senha de " + pendingSsid, "");
+      else                   setupPedirSenha(pendingSsid);
     }
     return;
   }

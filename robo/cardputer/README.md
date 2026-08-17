@@ -42,11 +42,11 @@ Quando o Raspberry responder com áudio, o firmware salva em `SD:/rx_audio.raw` 
 | `Ctrl` | volta |
 | `Del` | apaga; com o campo vazio, volta |
 
-O menu permite escolher uma rede do scan, digitar um SSID oculto, forçar uma URL de servidor, esquecer a rede salva ou sair.
+O menu permite escolher uma rede do scan, reconectar com a credencial salva, digitar um SSID oculto, forçar uma URL de servidor, esquecer a rede salva ou sair. O rodapé mostra a rede salva e o estado real da conexão, com o IP quando online.
 
 No primeiro boot, se não houver nada salvo e o `WIFI_SSID` ainda for o placeholder, a tela abre sozinha.
 
-A senha só é gravada depois de a conexão funcionar, então errar a senha não apaga uma configuração boa.
+A senha só é gravada depois de a conexão funcionar, então errar a senha não apaga uma configuração boa. Escolher de novo a rede que já está salva traz o campo de senha preenchido.
 
 ## Dependências lembradas
 
