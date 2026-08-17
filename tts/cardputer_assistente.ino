@@ -35,14 +35,30 @@
 #include <SD.h>
 #include <ArduinoWebsockets.h>
 #include <mbedtls/md.h>
+#include <Preferences.h>
 
 using namespace websockets;
 
 /* ====================== CONSTANTES CONFIGURAVEIS ===================== */
 // --- Wi-Fi / WebSocket ---
+// Estes valores sao apenas o padrao de fabrica. O que vale e o que estiver
+// salvo na NVS pela tela de configuracao (tecla W). Se nunca foi configurado
+// e o SSID ainda for o placeholder, o firmware abre a configuracao sozinho.
 #define WIFI_SSID   "SUA_REDE"
 #define WIFI_PASS   "SUA_SENHA"
-#define WS_URL      "ws://192.168.0.100:8765"   // fallback fixo (IP/porta do Raspberry)
+#define WS_URL      "ws://192.168.0.100:8765"   // ultimo recurso (ver descoberta)
+
+// --- Configuracao persistente (NVS) ---
+#define CFG_NAMESPACE  "robo"
+#define CFG_MAX_SSID   32
+#define CFG_MAX_PASS   64
+#define CFG_MAX_URL    48
+
+// --- UI de configuracao ---
+#define UI_LINE_H      10        // altura de linha com setTextSize(1)
+#define UI_LIST_TOP    16
+#define UI_LIST_ROWS   9         // linhas visiveis na lista de redes
+#define UI_MAX_NETS    24        // redes guardadas do scan
 
 // --- Descoberta UDP do servidor (v2.1) ---
 // ROBOT_SECRET deve ser IDENTICO ao do servidor Python.
@@ -127,6 +143,23 @@ enum RobotState {
   STATE_ERROR
 };
 
+// Telas da configuracao. SETUP_OFF = operacao normal do robo.
+enum SetupScreen {
+  SETUP_OFF,
+  SETUP_MENU,       // menu principal
+  SETUP_PICK,       // lista de redes do scan
+  SETUP_TEXT,       // entrada de texto (senha, SSID oculto, URL do servidor)
+  SETUP_BUSY        // conectando / escaneando
+};
+
+// Para onde vai o texto sendo digitado na tela SETUP_TEXT.
+enum TextTarget {
+  TXT_NONE,
+  TXT_PASS,         // senha da rede escolhida
+  TXT_SSID,         // SSID de rede oculta
+  TXT_SERVER        // URL manual do servidor (vazio = usar descoberta)
+};
+
 enum RobotMood {
   MOOD_NEUTRAL,
   MOOD_HAPPY,
@@ -152,6 +185,26 @@ enum Viseme {
 WebsocketsClient client;
 WiFiUDP disco;                       // v2.1: socket UDP de descoberta
 String  resolvedWsUrl = "";          // v2.1: URL descoberta; vazio => usa WS_URL
+
+// --- configuracao persistente ---
+Preferences prefs;
+String cfgSsid   = "";               // vazio => cai no #define WIFI_SSID
+String cfgPass   = "";
+String cfgServer = "";               // vazio => descoberta automatica
+
+// --- estado da UI de configuracao ---
+SetupScreen setupScreen = SETUP_OFF;
+TextTarget  textTarget  = TXT_NONE;
+String      textBuf     = "";        // conteudo sendo digitado
+String      textTitle   = "";
+String      pendingSsid = "";        // rede escolhida, aguardando senha
+int         menuIndex   = 0;
+int         netCount    = 0;
+int         netIndex    = 0;
+int         netScroll   = 0;
+String      netSsid[UI_MAX_NETS];
+int32_t     netRssi[UI_MAX_NETS];
+bool        netOpen[UI_MAX_NETS];    // rede sem senha
 
 // Buffer circular do microfone em RAM
 int16_t* micRing = nullptr;
@@ -229,6 +282,25 @@ void tocarArquivoRaw(const char* path);
 void lerTeclado();
 void tratarTecla(char k);
 
+void configLoad();
+void configSaveWifi(const String& ssid, const String& pass);
+void configSaveServer(const String& url);
+bool temConfigWifi();
+
+void setupEnter();
+void setupExit(bool reconectar);
+void setupLoop();
+void setupDraw();
+void setupDrawMenu();
+void setupDrawPick();
+void setupDrawText();
+void setupBusy(const String& linha1, const String& linha2);
+void setupScanRedes();
+void setupAbrirTexto(TextTarget alvo, const String& titulo, const String& inicial);
+void setupConfirmarTexto();
+void setupConectarRede(const String& ssid, const String& pass);
+void setupTeclado();
+
 void drawFaceBase();
 void drawBattery(bool force);
 void drawMoodEye(int cx, int eyeIndex, uint16_t col, bool allowBlink);
@@ -300,8 +372,19 @@ void setup() {
 
   // --- perifericos ---
   iniciarSD();
-  conectarWifi();
+  configLoad();
   configurarWebSocket();
+
+  nextBlinkMs = millis() + 3000;
+
+  // Sem credencial salva e com o SSID ainda no placeholder de fabrica, tentar
+  // conectar so gastaria 15 s ate falhar. Abre a configuracao direto.
+  if (!temConfigWifi()) {
+    setupEnter();
+    return;
+  }
+
+  conectarWifi();
 
   // v2.1: tenta descobrir o servidor antes de conectar; fallback fica no conectarWebSocket
   if (descobrirServidor()) {
@@ -312,13 +395,20 @@ void setup() {
   drawMsgLine();
 
   conectarWebSocket();
-
-  nextBlinkMs = millis() + 3000;
 }
 
 /* ============================= LOOP ================================= */
 void loop() {
   M5Cardputer.update();          // atualiza teclado + power
+
+  // A configuracao toma a tela inteira: nada de rede, mic ou rosto enquanto
+  // ela esta aberta.
+  if (setupScreen != SETUP_OFF) {
+    setupLoop();
+    delay(5);
+    return;
+  }
+
   lerTeclado();
 
   if (gravando) {
@@ -346,10 +436,47 @@ void loop() {
   yield();
 }
 
+/* =================== CONFIGURACAO PERSISTENTE (NVS) ================= *
+ * Fica na NVS e nao no SD: o SD e opcional e pode estar ausente, mas a
+ * credencial de rede precisa sobreviver a qualquer boot.
+ */
+void configLoad() {
+  prefs.begin(CFG_NAMESPACE, true);              // true = somente leitura
+  cfgSsid   = prefs.getString("ssid", "");
+  cfgPass   = prefs.getString("pass", "");
+  cfgServer = prefs.getString("server", "");
+  prefs.end();
+}
+
+void configSaveWifi(const String& ssid, const String& pass) {
+  prefs.begin(CFG_NAMESPACE, false);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.end();
+  cfgSsid = ssid;
+  cfgPass = pass;
+}
+
+void configSaveServer(const String& url) {
+  prefs.begin(CFG_NAMESPACE, false);
+  prefs.putString("server", url);
+  prefs.end();
+  cfgServer = url;
+}
+
+// Ha rede utilizavel? O placeholder compilado nao conta como configuracao.
+bool temConfigWifi() {
+  if (cfgSsid.length() > 0) return true;
+  return String(WIFI_SSID) != "SUA_REDE";
+}
+
 /* ========================= WI-FI ==================================== */
 void conectarWifi() {
+  String ssid = cfgSsid.length() ? cfgSsid : String(WIFI_SSID);
+  String pass = cfgPass.length() ? cfgPass : String(WIFI_PASS);
+
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.begin(ssid.c_str(), pass.c_str());
   unsigned long t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
     delay(200);
@@ -360,6 +487,360 @@ void conectarWifi() {
     strcpy(msgLine, "WiFi falhou");
   }
   drawMsgLine();
+}
+
+/* ==================== UI DE CONFIGURACAO (tecla W) ================== *
+ * Teclas: ;  sobe   .  desce   Enter confirma   Ctrl volta
+ * Del com o campo vazio tambem volta, como rota de fuga garantida caso a
+ * tecla Ctrl sozinha nao gere evento na sua versao da lib.
+ */
+
+static const char* MENU_ITENS[] = {
+  "Escolher rede Wi-Fi",
+  "Rede oculta (digitar SSID)",
+  "Servidor",
+  "Esquecer rede salva",
+  "Sair",
+};
+static const int MENU_TOTAL = 5;
+
+void setupCabecalho(const String& titulo) {
+  auto& d = M5Cardputer.Display;
+  d.fillScreen(TFT_BLACK);
+  d.setTextSize(1);
+  d.setTextColor(TFT_CYAN, TFT_BLACK);
+  d.setCursor(4, 3);
+  d.print(titulo);
+  d.drawFastHLine(0, 13, SCR_W, TFT_CYAN);
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+}
+
+void setupRodape(const String& dica) {
+  auto& d = M5Cardputer.Display;
+  d.drawFastHLine(0, SCR_H - 12, SCR_W, TFT_DARKGREY);
+  d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  d.setCursor(4, SCR_H - 9);
+  d.print(dica);
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+}
+
+void setupBusy(const String& linha1, const String& linha2) {
+  setupCabecalho("Aguarde");
+  auto& d = M5Cardputer.Display;
+  d.setCursor(4, 40);
+  d.print(linha1);
+  d.setCursor(4, 40 + UI_LINE_H);
+  d.print(linha2);
+}
+
+void setupDrawMenu() {
+  setupCabecalho("Configuracao");
+  auto& d = M5Cardputer.Display;
+
+  for (int i = 0; i < MENU_TOTAL; i++) {
+    int y = UI_LIST_TOP + i * UI_LINE_H;
+    bool sel = (i == menuIndex);
+
+    d.setTextColor(sel ? TFT_BLACK : TFT_WHITE, sel ? TFT_CYAN : TFT_BLACK);
+    d.setCursor(4, y);
+    d.print(sel ? ">" : " ");
+    d.print(MENU_ITENS[i]);
+
+    // o item "Servidor" mostra o valor atual na propria linha
+    if (i == 2) {
+      d.print(": ");
+      d.print(cfgServer.length() ? "manual" : "auto");
+    }
+    d.print("   ");
+  }
+
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  int y = UI_LIST_TOP + (MENU_TOTAL + 1) * UI_LINE_H;
+  d.setCursor(4, y);
+  d.print("Rede: ");
+  d.print(cfgSsid.length() ? cfgSsid : String("(padrao do firmware)"));
+
+  setupRodape("; sobe  . desce  Enter ok  Ctrl volta");
+}
+
+void setupDrawPick() {
+  setupCabecalho("Redes encontradas");
+  auto& d = M5Cardputer.Display;
+
+  if (netCount == 0) {
+    d.setCursor(4, UI_LIST_TOP);
+    d.print("Nenhuma rede encontrada.");
+    setupRodape("Ctrl volta");
+    return;
+  }
+
+  // mantem o item selecionado dentro da janela visivel
+  if (netIndex < netScroll)                 netScroll = netIndex;
+  if (netIndex >= netScroll + UI_LIST_ROWS) netScroll = netIndex - UI_LIST_ROWS + 1;
+
+  for (int row = 0; row < UI_LIST_ROWS; row++) {
+    int i = netScroll + row;
+    if (i >= netCount) break;
+
+    int y = UI_LIST_TOP + row * UI_LINE_H;
+    bool sel = (i == netIndex);
+
+    d.setTextColor(sel ? TFT_BLACK : TFT_WHITE, sel ? TFT_CYAN : TFT_BLACK);
+    d.setCursor(4, y);
+    d.print(sel ? ">" : " ");
+
+    // RSSI -> 4 barras; -50 dBm ou melhor = cheio, -90 = vazio
+    int barras = (netRssi[i] + 90) / 10;
+    if (barras > 4) barras = 4;
+    if (barras < 0) barras = 0;
+
+    String nome = netSsid[i];
+    if (nome.length() > 24) nome = nome.substring(0, 23) + "~";
+
+    d.print(nome);
+    d.setCursor(SCR_W - 46, y);
+    for (int b = 0; b < 4; b++) d.print(b < barras ? "|" : ".");
+    d.print(netOpen[i] ? " " : "*");
+  }
+
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  setupRodape("* = com senha   Enter escolhe");
+}
+
+void setupDrawText() {
+  setupCabecalho(textTitle);
+  auto& d = M5Cardputer.Display;
+
+  // Senha em texto claro de proposito: digitar as cegas num teclado deste
+  // tamanho gera mais erro do que o mascaramento evita.
+  String vis = textBuf + "_";
+  const int PER_LINE = 39;
+  int linha = 0;
+  for (int i = 0; i < (int)vis.length() && linha < 5; i += PER_LINE, linha++) {
+    d.setCursor(4, UI_LIST_TOP + linha * UI_LINE_H);
+    d.print(vis.substring(i, i + PER_LINE));
+  }
+
+  d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  d.setCursor(4, UI_LIST_TOP + 6 * UI_LINE_H);
+  d.print(textBuf.length());
+  d.print(" caracteres");
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+
+  setupRodape("Enter confirma  Del apaga  Ctrl volta");
+}
+
+void setupDraw() {
+  switch (setupScreen) {
+    case SETUP_MENU: setupDrawMenu(); break;
+    case SETUP_PICK: setupDrawPick(); break;
+    case SETUP_TEXT: setupDrawText(); break;
+    default: break;
+  }
+}
+
+void setupScanRedes() {
+  setupBusy("Procurando redes...", "Isso leva alguns segundos");
+
+  int n = WiFi.scanNetworks();
+  netCount = 0;
+
+  for (int i = 0; i < n && netCount < UI_MAX_NETS; i++) {
+    String ssid = WiFi.SSID(i);
+    if (ssid.length() == 0) continue;          // rede oculta: usar menu proprio
+
+    netSsid[netCount] = ssid;
+    netRssi[netCount] = WiFi.RSSI(i);
+    netOpen[netCount] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+    netCount++;
+  }
+
+  WiFi.scanDelete();
+  netIndex = 0;
+  netScroll = 0;
+  setupScreen = SETUP_PICK;
+  setupDraw();
+}
+
+void setupAbrirTexto(TextTarget alvo, const String& titulo, const String& inicial) {
+  textTarget = alvo;
+  textTitle  = titulo;
+  textBuf    = inicial;
+  setupScreen = SETUP_TEXT;
+  setupDraw();
+}
+
+void setupConectarRede(const String& ssid, const String& pass) {
+  setupBusy("Conectando em:", ssid);
+
+  WiFi.disconnect();
+  delay(120);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
+    delay(200);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    // So grava depois de funcionar: senha errada nao apaga a config boa.
+    configSaveWifi(ssid, pass);
+    setupBusy("Conectado!", WiFi.localIP().toString());
+    delay(1200);
+    setupExit(false);                          // ja esta conectado
+    return;
+  }
+
+  setupBusy("Falhou. Senha errada?", "Nada foi salvo.");
+  delay(2000);
+  setupScreen = SETUP_MENU;
+  setupDraw();
+}
+
+void setupConfirmarTexto() {
+  switch (textTarget) {
+    case TXT_PASS:
+      setupConectarRede(pendingSsid, textBuf);
+      break;
+
+    case TXT_SSID:
+      pendingSsid = textBuf;
+      if (pendingSsid.length() == 0) {
+        setupScreen = SETUP_MENU;
+        setupDraw();
+        return;
+      }
+      setupAbrirTexto(TXT_PASS, "Senha de " + pendingSsid, "");
+      break;
+
+    case TXT_SERVER:
+      textBuf.trim();
+      configSaveServer(textBuf);
+      resolvedWsUrl = "";                      // forca redescoberta
+      setupScreen = SETUP_MENU;
+      setupDraw();
+      break;
+
+    default:
+      setupScreen = SETUP_MENU;
+      setupDraw();
+      break;
+  }
+}
+
+void setupEnter() {
+  if (gravando) pararGravacaoCircular();
+  setupScreen = SETUP_MENU;
+  menuIndex = 0;
+  setupDraw();
+}
+
+void setupExit(bool reconectar) {
+  setupScreen = SETUP_OFF;
+  textTarget = TXT_NONE;
+
+  drawFaceBase();
+  setRobotState(STATE_IDLE);
+  drawBattery(true);
+
+  if (reconectar && WiFi.status() != WL_CONNECTED) {
+    conectarWifi();
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    resolvedWsUrl = "";
+    descobrirServidor();
+    conectarWebSocket();
+  }
+
+  drawMsgLine();
+}
+
+void setupTeclado() {
+  if (!M5Cardputer.Keyboard.isChange())  return;
+  if (!M5Cardputer.Keyboard.isPressed()) return;
+
+  Keyboard_Class::KeysState st = M5Cardputer.Keyboard.keysState();
+
+  // ---------- entrada de texto ----------
+  if (setupScreen == SETUP_TEXT) {
+    if (st.del) {
+      if (textBuf.length() == 0) {             // apagar no vazio = voltar
+        setupScreen = SETUP_MENU;
+        setupDraw();
+        return;
+      }
+      textBuf.remove(textBuf.length() - 1);
+      setupDraw();
+      return;
+    }
+
+    if (st.enter) { setupConfirmarTexto(); return; }
+
+    if (st.ctrl) {
+      setupScreen = SETUP_MENU;
+      setupDraw();
+      return;
+    }
+
+    bool mudou = false;
+    for (auto c : st.word) {
+      if (textBuf.length() < CFG_MAX_PASS) { textBuf += c; mudou = true; }
+    }
+    if (st.space && textBuf.length() < CFG_MAX_PASS) { textBuf += ' '; mudou = true; }
+    if (mudou) setupDraw();
+    return;
+  }
+
+  // ---------- navegacao em listas ----------
+  bool sobe = false, desce = false, voltar = st.ctrl;
+  for (auto c : st.word) {
+    if (c == ';') sobe  = true;
+    if (c == '.') desce = true;
+    if (c == '`') voltar = true;               // tecla ESC do Cardputer
+  }
+
+  if (setupScreen == SETUP_MENU) {
+    if (voltar) { setupExit(true); return; }
+    if (sobe)  { menuIndex = (menuIndex + MENU_TOTAL - 1) % MENU_TOTAL; setupDraw(); return; }
+    if (desce) { menuIndex = (menuIndex + 1) % MENU_TOTAL;              setupDraw(); return; }
+
+    if (st.enter) {
+      switch (menuIndex) {
+        case 0: setupScanRedes(); break;
+        case 1: setupAbrirTexto(TXT_SSID, "SSID da rede oculta", ""); break;
+        case 2: setupAbrirTexto(TXT_SERVER, "Servidor (vazio = auto)", cfgServer); break;
+        case 3:
+          configSaveWifi("", "");
+          setupBusy("Rede esquecida.", "Escolha outra no menu.");
+          delay(1200);
+          setupDraw();
+          break;
+        case 4: setupExit(true); break;
+      }
+    }
+    return;
+  }
+
+  if (setupScreen == SETUP_PICK) {
+    if (voltar) { setupScreen = SETUP_MENU; setupDraw(); return; }
+    if (netCount == 0) return;
+
+    if (sobe)  { netIndex = (netIndex + netCount - 1) % netCount; setupDraw(); return; }
+    if (desce) { netIndex = (netIndex + 1) % netCount;            setupDraw(); return; }
+
+    if (st.enter) {
+      pendingSsid = netSsid[netIndex];
+      if (netOpen[netIndex]) setupConectarRede(pendingSsid, "");
+      else                   setupAbrirTexto(TXT_PASS, "Senha de " + pendingSsid, "");
+    }
+    return;
+  }
+}
+
+void setupLoop() {
+  setupTeclado();
 }
 
 /* ================== DESCOBERTA UDP + HMAC (v2.1) ==================== */
@@ -859,7 +1340,7 @@ void lerTeclado() {
 
   for (auto c : st.word) {
     char k = tolower(c);
-    if (k == 'r' || k == 's' || k == 'p') tratarTecla(k);
+    if (k == 'r' || k == 's' || k == 'p' || k == 'w') tratarTecla(k);
   }
   if (st.space) tratarTecla(' ');
 }
@@ -884,6 +1365,10 @@ void tratarTecla(char k) {
         strcpy(msgLine, "WS offline");
       }
       drawMsgLine();
+      break;
+
+    case 'w':                              // abre a configuracao de rede
+      setupEnter();
       break;
   }
 }
